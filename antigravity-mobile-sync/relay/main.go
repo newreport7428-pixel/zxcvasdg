@@ -1,6 +1,6 @@
 // Mobile Sync relay: runs on your VPS so the phone can reach Antigravity from anywhere.
 //
-//   phone --HTTPS--> relay (VPS) <--WSS-- Antigravity extension (your computer)
+//	phone --HTTPS--> relay (VPS) <--WSS-- Antigravity extension (your computer)
 //
 // The computer dials out to the relay, so nothing needs to be opened on your home router.
 // The relay only forwards requests; the secret key in the phone link is still checked on
@@ -55,8 +55,10 @@ const (
 )
 
 type Config struct {
-	Host     string `json:"host"`     // domain name (Let's Encrypt) or public IP (self-signed)
-	AgentKey string `json:"agentKey"` // shared with the extension, never sent over the wire
+	Host     string `json:"host"`              // domain name (Let's Encrypt) or public IP (self-signed)
+	AgentKey string `json:"agentKey"`          // shared with the extension, never sent over the wire
+	Listen   string `json:"listen,omitempty"`  // HTTPS address, default :443
+	Webroot  string `json:"webroot,omitempty"` // IIS site folder when IIS owns port 80
 }
 
 // ---------------------------------------------------------------- messages
@@ -446,12 +448,29 @@ func loadOrCreateConfig(path string) (Config, error) {
 	fmt.Println("Enter this VPS's domain name (recommended, e.g. mycode.duckdns.org)")
 	fmt.Println("or its public IP address (works, but the phone will show a certificate warning):")
 	fmt.Print("> ")
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	in := bufio.NewReader(os.Stdin)
+	line, _ := in.ReadString('\n')
 	cfg.Host = strings.ToLower(strings.TrimSpace(line))
 	cfg.Host = strings.TrimPrefix(strings.TrimPrefix(cfg.Host, "https://"), "http://")
 	cfg.Host = strings.TrimSuffix(cfg.Host, "/")
 	if cfg.Host == "" || strings.ContainsAny(cfg.Host, " /:") {
 		return cfg, errors.New("no valid domain or IP entered")
+	}
+	if net.ParseIP(cfg.Host) == nil {
+		fmt.Println()
+		fmt.Println("Is IIS (or another web server) already using port 80/443 on this VPS?")
+		fmt.Println("  - If YES: type the folder of the IIS website that answers on port 80")
+		fmt.Println("    (usually C:\\inetpub\\wwwroot). The relay will then use port 8443.")
+		fmt.Println("  - If NO: just press Enter (the relay uses ports 443 and 80).")
+		fmt.Print("> ")
+		wr, _ := in.ReadString('\n')
+		cfg.Webroot = strings.Trim(strings.TrimSpace(wr), `"`)
+		if cfg.Webroot != "" {
+			if st, err := os.Stat(cfg.Webroot); err != nil || !st.IsDir() {
+				return cfg, fmt.Errorf("folder %q not found", cfg.Webroot)
+			}
+			cfg.Listen = ":8443"
+		}
 	}
 	cfg.AgentKey = randString(32)
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -465,9 +484,12 @@ func main() {
 	exe, _ := os.Executable()
 	base := filepath.Dir(exe)
 	cfgPath := flag.String("config", filepath.Join(base, "relay-config.json"), "config file")
-	listen := flag.String("listen", ":443", "HTTPS address")
+	listen := flag.String("listen", "", "HTTPS address (default from config, else :443)")
 	httpListen := flag.String("http", ":80", "HTTP address for redirects and certificate checks (empty to disable)")
 	devPlain := flag.String("dev-plain-http", "", "TESTING ONLY: serve without TLS on this address")
+	acmeDir := flag.String("acme-directory", autocert.DefaultACMEDirectory, "ACME directory URL")
+	acmeCA := flag.String("acme-ca", "", "TESTING ONLY: extra CA file to trust for the ACME server")
+	selfCheckAddr := flag.String("selfcheck-addr", "", "TESTING ONLY: address used for the webroot self-check")
 	flag.Parse()
 
 	logFile, err := os.OpenFile(filepath.Join(base, "relay.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -481,6 +503,32 @@ func main() {
 	}
 	certDir := filepath.Join(base, "certs")
 	os.MkdirAll(certDir, 0o700)
+	if *listen == "" {
+		*listen = cfg.Listen
+	}
+	if *listen == "" {
+		*listen = ":443"
+	}
+	if cfg.Webroot != "" {
+		*httpListen = "" // IIS owns port 80
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	roots.AppendCertsFromPEM(isrgRoot) // old Windows may lack the Let's Encrypt root
+	if *acmeCA != "" {
+		if b, err := os.ReadFile(*acmeCA); err == nil {
+			roots.AppendCertsFromPEM(b)
+		}
+	}
+	acmeClient := &acme.Client{
+		DirectoryURL: *acmeDir,
+		HTTPClient: &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{
+			Proxy:           http.ProxyFromEnvironment,
+			TLSClientConfig: &tls.Config{RootCAs: roots},
+		}},
+	}
 
 	r := &relay{cfg: cfg, up: websocket.Upgrader{ReadBufferSize: 32 << 10, WriteBufferSize: 32 << 10}}
 	mux := http.NewServeMux()
@@ -518,31 +566,22 @@ func main() {
 				}
 			}()
 		}
-	} else {
-		roots, err := x509.SystemCertPool()
-		if err != nil || roots == nil {
-			roots = x509.NewCertPool()
+	} else if cfg.Webroot != "" {
+		wc := &webrootCerts{host: cfg.Host, webroot: cfg.Webroot, dir: certDir, client: acmeClient, selfCheckAddr: *selfCheckAddr}
+		log.Printf("getting a certificate for %s through the IIS folder %s ...", cfg.Host, cfg.Webroot)
+		if err := wc.start(); err != nil {
+			log.Fatalf("could not get a certificate: %v", err)
 		}
-		roots.AppendCertsFromPEM(isrgRoot) // old Windows may lack the Let's Encrypt root
+		srv.TLSConfig = &tls.Config{GetCertificate: wc.GetCertificate, MinVersion: tls.VersionTLS12}
+	} else {
 		m := &autocert.Manager{
 			Prompt:     autocert.AcceptTOS,
 			HostPolicy: autocert.HostWhitelist(cfg.Host),
 			Cache:      autocert.DirCache(certDir),
-			Client: &acme.Client{
-				DirectoryURL: autocert.DefaultACMEDirectory,
-				HTTPClient: &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{
-					Proxy:           http.ProxyFromEnvironment,
-					TLSClientConfig: &tls.Config{RootCAs: roots},
-				}},
-			},
+			Client:     acmeClient,
 		}
 		srv.TLSConfig = m.TLSConfig()
 		srv.TLSConfig.MinVersion = tls.VersionTLS12
-		hsts := mux
-		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
-			hsts.ServeHTTP(w, req)
-		})
 		if *httpListen != "" {
 			go func() {
 				err := http.ListenAndServe(*httpListen, m.HTTPHandler(http.HandlerFunc(redirectHTTPS)))
@@ -551,6 +590,13 @@ func main() {
 				}
 			}()
 		}
+	}
+	if !isIP {
+		hsts := mux
+		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+			hsts.ServeHTTP(w, req)
+		})
 	}
 
 	os.WriteFile(filepath.Join(base, "connect-string.txt"), []byte(connect+"\r\n"), 0o600)
