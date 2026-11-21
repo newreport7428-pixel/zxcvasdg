@@ -456,21 +456,13 @@ func loadOrCreateConfig(path string) (Config, error) {
 	if cfg.Host == "" || strings.ContainsAny(cfg.Host, " /:") {
 		return cfg, errors.New("no valid domain or IP entered")
 	}
-	if net.ParseIP(cfg.Host) == nil {
-		fmt.Println()
-		fmt.Println("Is IIS (or another web server) already using port 80/443 on this VPS?")
-		fmt.Println("  - If YES: type the folder of the IIS website that answers on port 80")
-		fmt.Println("    (usually C:\\inetpub\\wwwroot). The relay will then use port 8443.")
-		fmt.Println("  - If NO: just press Enter (the relay uses ports 443 and 80).")
-		fmt.Print("> ")
-		wr, _ := in.ReadString('\n')
-		cfg.Webroot = strings.Trim(strings.TrimSpace(wr), `"`)
-		if cfg.Webroot != "" {
-			if st, err := os.Stat(cfg.Webroot); err != nil || !st.IsDir() {
-				return cfg, fmt.Errorf("folder %q not found", cfg.Webroot)
-			}
-			cfg.Listen = ":8443"
+	if net.ParseIP(cfg.Host) == nil && (webrootPortsBusy()) {
+		wr, err := askWebroot(in, cfg.Host)
+		if err != nil {
+			return cfg, err
 		}
+		cfg.Webroot = wr
+		cfg.Listen = ":8443"
 	}
 	cfg.AgentKey = randString(32)
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -479,6 +471,9 @@ func loadOrCreateConfig(path string) (Config, error) {
 	}
 	return cfg, nil
 }
+
+// webrootPortsBusy is replaceable in tests.
+var webrootPortsBusy = func() bool { return portBusy(":80") || portBusy(":443") }
 
 func main() {
 	exe, _ := os.Executable()
@@ -606,13 +601,7 @@ func main() {
 			}()
 		}
 	}
-	if !isIP {
-		hsts := mux
-		srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
-			hsts.ServeHTTP(w, req)
-		})
-	}
+	// No HSTS header: it would also apply to any website on the same domain at port 443.
 
 	os.WriteFile(filepath.Join(base, "connect-string.txt"), []byte(connect+"\r\n"), 0o600)
 	if *setupOnly {
