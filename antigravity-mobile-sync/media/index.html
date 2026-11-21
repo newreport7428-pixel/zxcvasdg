@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#21252b">
+<meta name="referrer" content="no-referrer">
+<title>Mobile Sync</title>
+<link rel="icon" href="icon.svg">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <button id="menu" type="button" aria-label="ไฟล์">☰</button>
+  <div class="titlebox"><span id="title">Mobile Sync</span><span id="dirty" hidden title="ยังไม่ได้บันทึก">●</span></div>
+  <span id="status" data-state="connecting"></span>
+  <button id="save" type="button" disabled>บันทึก</button>
+</header>
+<nav id="tabs" hidden></nav>
+<main id="editor"></main>
+<div id="keybar"></div>
+
+<div id="scrim" hidden></div>
+<aside id="drawer">
+  <h3>เปิดอยู่บนคอม</h3>
+  <div id="pcTabs"></div>
+  <h3>ค้นหาไฟล์ในโปรเจกต์ <button id="reload" type="button" title="โหลดใหม่">⟳</button></h3>
+  <input id="search" type="search" placeholder="พิมพ์ชื่อไฟล์…" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <div id="results"></div>
+  <h3>ตั้งค่า</h3>
+  <label class="row"><input id="follow" type="checkbox"> เปิดไฟล์ตามคอมอัตโนมัติ</label>
+  <label class="row"><input id="wrap" type="checkbox"> ตัดบรรทัดยาว</label>
+  <div class="row">ขนาดตัวอักษร
+    <button id="fsDown" type="button">A−</button><span id="fsLabel"></span><button id="fsUp" type="button">A+</button>
+  </div>
+  <button id="forget" type="button" class="danger">ลืมรหัสบนมือถือเครื่องนี้</button>
+</aside>
+
+<div id="login" hidden>
+  <form id="loginForm">
+    <h2>เชื่อมต่อกับคอม</h2>
+    <p id="loginReason"></p>
+    <p>บนคอม: กด <b>Mobile Sync</b> ที่แถบล่างของ Antigravity แล้วสแกน QR ด้วยกล้องมือถือ<br>หรือวางลิงก์/รหัสที่นี่:</p>
+    <input id="tokenInput" type="password" placeholder="ลิงก์หรือรหัส" autocomplete="off">
+    <button type="submit">เชื่อมต่อ</button>
+  </form>
+</div>
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
