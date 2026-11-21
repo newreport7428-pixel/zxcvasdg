@@ -5,6 +5,7 @@ import { basicSetup } from 'codemirror';
 import { indentWithTab, undo, redo, indentMore, indentLess } from '@codemirror/commands';
 import { StreamLanguage } from '@codemirror/language';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { setDiagnostics, lintGutter, openLintPanel } from '@codemirror/lint';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
 import { html } from '@codemirror/lang-html';
@@ -184,6 +185,7 @@ function extensionsFor(d) {
     keymap.of([indentWithTab]),
     oneDark,
     wrapComp.of(prefs.wrap ? EditorView.lineWrapping : []),
+    lintGutter(),
     languageFor(d.languageId, d.path),
     EditorView.updateListener.of((u) => {
       for (const tr of u.transactions) {
@@ -340,6 +342,7 @@ async function openDoc(uri, { quiet = false } = {}) {
   };
   d.state = EditorState.create({ doc: data.text, extensions: extensionsFor(d) });
   docs.set(uri, d);
+  applyDiags(d, data.diags || []);
   showDoc(uri);
 }
 
@@ -372,12 +375,105 @@ function closeDoc(uri) {
   renderHeader();
 }
 
-async function saveCurrent() {
-  const d = current && docs.get(current);
-  if (!d) return;
+// Make sure everything typed on the phone has reached the computer.
+async function settle(d) {
   clearTimeout(d.flushTimer);
   await flush(d);
   for (let i = 0; i < 50 && (d.inflight || d.pending); i++) await new Promise((r) => setTimeout(r, 50));
+}
+
+// ---------------------------------------------------------------- problems from extensions
+function applyDiags(d, diags) {
+  const text = docText(d);
+  const clamp = ({ l, c }) => {
+    if (l + 1 > text.lines) return text.length;
+    const line = text.line(l + 1);
+    return line.from + Math.min(c, line.length);
+  };
+  const list = [];
+  for (const x of diags || []) {
+    const from = clamp(x.from);
+    const to = Math.max(from, clamp(x.to));
+    list.push({ from, to, severity: x.severity, message: x.message, source: x.source || undefined });
+  }
+  d.problems = { error: 0, warning: 0 };
+  for (const x of list) if (x.severity in d.problems) d.problems[x.severity]++;
+  const state = d.uri === current ? view.state : d.state;
+  setState(d, setDiagnostics(state, list));
+  renderHeader();
+}
+
+// ---------------------------------------------------------------- commands from extensions
+let commandList = null;
+async function loadCommands() {
+  commandList = null;
+  renderCommands();
+  try {
+    const res = await api('/api/commands');
+    commandList = res.allowed ? res.commands : [];
+    if (!res.allowed) toast('คอมปิดการรันคำสั่งจากมือถือไว้ (mobileSync.allowCommands)');
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin(err.message);
+    commandList = [];
+    toast('โหลดรายการคำสั่งไม่ได้');
+  }
+  renderCommands();
+}
+
+function renderCommands() {
+  const box = $('#cmdList');
+  if (!commandList) return box.replaceChildren(el('p', { className: 'muted', textContent: 'กำลังโหลดคำสั่ง…' }));
+  const terms = $('#cmdSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const recent = store.get('recentCmds', []);
+  let items = commandList.filter((c) => terms.every((t) => (c.title + ' ' + c.id + ' ' + c.ext).toLowerCase().includes(t)));
+  if (!terms.length) {
+    const rec = recent.map((id) => commandList.find((c) => c.id === id)).filter(Boolean);
+    items = [...rec, ...items.filter((c) => !recent.includes(c.id))];
+  }
+  items = items.slice(0, 100);
+  box.replaceChildren(
+    ...(items.length
+      ? items.map((c) => {
+          const row = el('button', { className: 'file' + (recent.includes(c.id) ? ' recent' : '') }, el('span', { className: 'name', textContent: c.title }), el('span', { className: 'dir', textContent: c.ext }));
+          row.onclick = () => runCommand(c);
+          return row;
+        })
+      : [el('p', { className: 'muted', textContent: 'ไม่พบคำสั่ง' })])
+  );
+}
+
+async function runCommand(c) {
+  closeCommands();
+  const d = current && docs.get(current);
+  if (d) await settle(d);
+  store.set('recentCmds', [c.id, ...store.get('recentCmds', []).filter((x) => x !== c.id)].slice(0, 8));
+  toast(`กำลังรัน: ${c.title}`, 1500);
+  try {
+    const res = await api('/api/run', { id: c.id, uri: current });
+    if (!res.ok) toast(`รันไม่สำเร็จ: ${res.error}`, 4000);
+    else if (res.done) toast(`รันแล้ว ✓ ${c.title}`, 2000);
+    else toast('ส่งคำสั่งแล้ว — ถ้าคำสั่งนี้ถามอะไรต่อ ต้องตอบบนคอม', 4000);
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin(err.message);
+    toast('รันคำสั่งไม่ได้ — ไม่ได้เชื่อมต่อ');
+  }
+}
+
+function openCommands() {
+  $('#cmdSheet').hidden = false;
+  $('#cmdSearch').value = '';
+  if (!commandList) loadCommands();
+  else renderCommands();
+  $('#cmdSearch').focus();
+}
+function closeCommands() {
+  $('#cmdSheet').hidden = true;
+}
+
+async function saveCurrent() {
+  const d = current && docs.get(current);
+  if (!d) return;
+  await settle(d);
   try {
     const res = await api('/api/save', { uri: d.uri });
     if (res.ok) {
@@ -442,6 +538,11 @@ function connect() {
         }
         break;
       }
+      case 'diag': {
+        const d = docs.get(ev.uri);
+        if (d) applyDiags(d, ev.diags);
+        break;
+      }
       case 'reset': {
         const d = docs.get(ev.uri);
         if (d) resync(d);
@@ -483,6 +584,11 @@ function renderHeader() {
   $('#title').title = d ? d.path : '';
   $('#dirty').hidden = !(d && d.dirty);
   $('#save').disabled = !d;
+  const p = d && d.problems;
+  const badge = $('#problems');
+  badge.hidden = !(p && (p.error || p.warning));
+  if (!badge.hidden) badge.textContent = [p.error ? `✖${p.error}` : '', p.warning ? `⚠${p.warning}` : ''].filter(Boolean).join(' ');
+  badge.classList.toggle('has-error', !!(p && p.error));
   for (const tab of document.querySelectorAll('#tabs .tab')) {
     const td = docs.get(tab.dataset.uri);
     tab.classList.toggle('dirty', !!(td && td.dirty));
@@ -623,6 +729,11 @@ function wire() {
   $('#menu').onclick = openDrawer;
   $('#scrim').onclick = closeDrawer;
   $('#save').onclick = saveCurrent;
+  $('#cmd').onclick = openCommands;
+  $('#cmdClose').onclick = closeCommands;
+  $('#cmdReload').onclick = loadCommands;
+  $('#cmdSearch').oninput = renderCommands;
+  $('#problems').onclick = () => openLintPanel(view);
   $('#search').oninput = renderSearch;
   $('#reload').onclick = loadFiles;
   $('#wrap').onchange = (e) => setWrap(e.target.checked);

@@ -20,6 +20,7 @@ function config() {
     port: c.get('port', 8765),
     host: c.get('host', '0.0.0.0'),
     notifyOnConnect: c.get('notifyOnConnect', true),
+    allowCommands: c.get('allowCommands', true),
   };
 }
 
@@ -59,6 +60,7 @@ async function start(context) {
     port: cfg.port,
     host: cfg.host,
     token,
+    allowCommands: cfg.allowCommands,
     agentNonce: require('crypto').randomBytes(24).toString('base64url'),
     mediaDir: vscode.Uri.joinPath(context.extensionUri, 'media').fsPath,
     onClientsChanged: (info) => {

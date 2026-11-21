@@ -3559,6 +3559,17 @@ var require_server = __commonJS({
     var MAX_DOC_CHARS = 5 * 1024 * 1024;
     var MAX_FAILS = 10;
     var BLOCK_MS = 15 * 60 * 1e3;
+    var BUILTIN_COMMANDS = [
+      ["editor.action.formatDocument", "Format Document"],
+      ["editor.action.organizeImports", "Organize Imports"],
+      ["editor.action.fixAll", "Fix All"],
+      ["editor.action.sourceAction", "Source Action..."],
+      ["workbench.action.files.saveAll", "Save All"],
+      ["workbench.action.files.revert", "Revert File (discard unsaved changes)"],
+      ["editor.action.trimTrailingWhitespace", "Trim Trailing Whitespace"],
+      ["editor.action.transformToUppercase", "Transform to Uppercase"],
+      ["editor.action.transformToLowercase", "Transform to Lowercase"]
+    ];
     var HISTORY = 500;
     var FILE_EXCLUDE = "**/{node_modules,.git,dist,out,build,.next,.nuxt,.venv,venv,__pycache__,target,.gradle,Pods}/**";
     var normalize = (s) => s.replace(/\r\n?/g, "\n");
@@ -3676,6 +3687,16 @@ var require_server = __commonJS({
             if (ed) this.broadcast({ type: "active", uri: ed.document.uri.toString() });
           })
         );
+        if (vs.languages && vs.languages.onDidChangeDiagnostics) {
+          this.disposables.push(
+            vs.languages.onDidChangeDiagnostics((e) => {
+              for (const u of e.uris) {
+                const uri = u.toString();
+                if (this.watched.has(uri)) this.broadcast({ type: "diag", uri, diags: this.diagnostics(u) });
+              }
+            })
+          );
+        }
       }
       tabs() {
         const vs = this.vscode;
@@ -3738,11 +3759,13 @@ var require_server = __commonJS({
         if (route === "GET /api/events") return this.events(req, res, url, address);
         if (route === "GET /api/tabs") return this.json(res, { tabs: this.tabs(), active: this.activeUri() });
         if (route === "GET /api/files") return this.json(res, { files: await this.files() });
+        if (route === "GET /api/commands") return this.json(res, this.commandList());
         if (req.method !== "POST") return this.fail(res, 404, "not found");
         const body = await readJson(req);
         if (route === "POST /api/open") return this.json(res, await this.open(body));
         if (route === "POST /api/edit") return this.json(res, await this.edit(body));
         if (route === "POST /api/save") return this.json(res, await this.save(body));
+        if (route === "POST /api/run") return this.json(res, await this.run(body));
         return this.fail(res, 404, "not found");
       }
       events(req, res, url, address) {
@@ -3802,7 +3825,8 @@ var require_server = __commonJS({
           text: w.shadow.toString(),
           languageId: doc.languageId,
           dirty: doc.isDirty,
-          path: doc.uri.scheme === "file" ? vs.workspace.asRelativePath(doc.uri) : doc.uri.path
+          path: doc.uri.scheme === "file" ? vs.workspace.asRelativePath(doc.uri) : doc.uri.path,
+          diags: this.diagnostics(doc.uri)
         };
       }
       track(doc) {
@@ -3852,8 +3876,67 @@ var require_server = __commonJS({
       async save({ uri }) {
         const doc = typeof uri === "string" && this.watched.has(uri) && this.findDoc(uri);
         if (!doc) return { ok: false, error: "gone" };
-        const ok = await doc.save();
+        let ok;
+        if (typeof this.vscode.workspace.save === "function") ok = !!await this.vscode.workspace.save(doc.uri);
+        else ok = await doc.save();
         return { ok, version: doc.version, dirty: doc.isDirty };
+      }
+      // Problems reported by language extensions (ESLint, Pylance, TypeScript, ...).
+      diagnostics(uri) {
+        const vs = this.vscode;
+        if (!vs.languages || !vs.languages.getDiagnostics) return [];
+        const sev = ["error", "warning", "info", "hint"];
+        return vs.languages.getDiagnostics(uri).slice(0, 500).map((d) => ({
+          from: { l: d.range.start.line, c: d.range.start.character },
+          to: { l: d.range.end.line, c: d.range.end.character },
+          severity: sev[d.severity] || "info",
+          message: String(d.message).slice(0, 2e3),
+          source: d.source ? String(d.source) + (d.code !== void 0 ? `(${typeof d.code === "object" ? d.code.value : d.code})` : "") : ""
+        }));
+      }
+      // Commands that extensions add to the Command Palette, plus a few useful built-ins.
+      commandList() {
+        const vs = this.vscode;
+        const allow = this.opts.allowCommands !== false;
+        if (!allow) return { allowed: false, commands: [] };
+        const out = /* @__PURE__ */ new Map();
+        const add = (id, title, category, ext) => {
+          if (!id || !title || out.has(id)) return;
+          out.set(id, { id, title: category ? `${category}: ${title}` : title, ext });
+        };
+        for (const [id, title] of BUILTIN_COMMANDS) add(id, title, "", "Antigravity");
+        for (const ext of vs.extensions ? vs.extensions.all : []) {
+          const pj = ext.packageJSON || {};
+          const contributes = pj.contributes || {};
+          const hidden = new Set(
+            (contributes.menus && contributes.menus.commandPalette || []).filter((m) => m && m.when === "false").map((m) => m.command)
+          );
+          const cmds = Array.isArray(contributes.commands) ? contributes.commands : contributes.commands ? [contributes.commands] : [];
+          for (const c of cmds) {
+            if (!c || hidden.has(c.command)) continue;
+            const title = typeof c.title === "string" ? c.title : c.title && c.title.value;
+            const cat = typeof c.category === "string" ? c.category : c.category && c.category.value;
+            if (!title || title.startsWith("%")) continue;
+            add(c.command, title, cat && !cat.startsWith("%") ? cat : "", pj.displayName || pj.name || ext.id);
+          }
+        }
+        return { allowed: true, commands: [...out.values()].sort((a, b) => a.title.localeCompare(b.title)) };
+      }
+      // Run a command on the computer with the phone's current file as the active editor.
+      async run({ id, uri }) {
+        const vs = this.vscode;
+        if (this.opts.allowCommands === false) return { ok: false, error: "\u0E1B\u0E34\u0E14\u0E01\u0E32\u0E23\u0E23\u0E31\u0E19\u0E04\u0E33\u0E2A\u0E31\u0E48\u0E07\u0E08\u0E32\u0E01\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E44\u0E27\u0E49 (mobileSync.allowCommands)" };
+        if (typeof id !== "string" || !id || id.length > 200) return { ok: false, error: "bad command" };
+        if (typeof uri === "string" && this.watched.has(uri)) {
+          const doc = this.findDoc(uri);
+          if (doc) await vs.window.showTextDocument(doc, { preview: false, preserveFocus: false });
+        }
+        const exec = Promise.resolve(vs.commands.executeCommand(id)).then(
+          () => ({ ok: true, done: true }),
+          (err) => ({ ok: false, error: String(err && err.message || err).slice(0, 500) })
+        );
+        const later = new Promise((r) => setTimeout(() => r({ ok: true, done: false }), 4e3));
+        return Promise.race([exec, later]);
       }
       json(res, obj) {
         res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" });
@@ -9389,7 +9472,8 @@ function config() {
   return {
     port: c.get("port", 8765),
     host: c.get("host", "0.0.0.0"),
-    notifyOnConnect: c.get("notifyOnConnect", true)
+    notifyOnConnect: c.get("notifyOnConnect", true),
+    allowCommands: c.get("allowCommands", true)
   };
 }
 async function getToken(context, reset = false) {
@@ -9426,6 +9510,7 @@ async function start(context) {
     port: cfg.port,
     host: cfg.host,
     token,
+    allowCommands: cfg.allowCommands,
     agentNonce: require("crypto").randomBytes(24).toString("base64url"),
     mediaDir: vscode.Uri.joinPath(context.extensionUri, "media").fsPath,
     onClientsChanged: (info) => {

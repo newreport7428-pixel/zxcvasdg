@@ -14,7 +14,9 @@
 <header>
   <button id="menu" type="button" aria-label="ไฟล์">☰</button>
   <div class="titlebox"><span id="title">Mobile Sync</span><span id="dirty" hidden title="ยังไม่ได้บันทึก">●</span></div>
+  <button id="problems" type="button" hidden title="ปัญหาที่ extension บนคอมตรวจเจอ"></button>
   <span id="status" data-state="connecting"></span>
+  <button id="cmd" type="button" aria-label="รันคำสั่งบนคอม" title="รันคำสั่งของ extension บนคอม">⚡</button>
   <button id="save" type="button" disabled>บันทึก</button>
 </header>
 <nav id="tabs" hidden></nav>
@@ -36,6 +38,16 @@
   </div>
   <button id="forget" type="button" class="danger">ลืมรหัสบนมือถือเครื่องนี้</button>
 </aside>
+
+<div id="cmdSheet" hidden>
+  <div class="sheetHead">
+    <input id="cmdSearch" type="search" placeholder="ค้นหาคำสั่ง เช่น sftp upload" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button id="cmdReload" type="button" title="โหลดใหม่">⟳</button>
+    <button id="cmdClose" type="button" aria-label="ปิด">✕</button>
+  </div>
+  <p class="muted">คำสั่งจะรันบนคอม กับไฟล์ที่เปิดอยู่บนมือถือ</p>
+  <div id="cmdList"></div>
+</div>
 
 <div id="login" hidden>
   <form id="loginForm">

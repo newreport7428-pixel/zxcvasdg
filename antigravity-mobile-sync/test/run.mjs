@@ -5,7 +5,27 @@ import { fileURLToPath } from 'url';
 const require = createRequire(import.meta.url);
 const { chromium, devices } = require('playwright');
 const { SyncServer } = require('../src/server.js');
-const { vscode, addDoc, pcInsert } = require('./mock-vscode.js');
+const { vscode, addDoc, pcInsert, setDiagnostics } = require('./mock-vscode.js');
+
+// A fake "SFTP" extension installed on the computer: uploads on save + an upload command.
+const uploads = [];
+vscode.workspace.onDidSaveTextDocument((d) => uploads.push(['on-save', d.uri.path.split('/').pop()]));
+vscode.commands.registerCommand('sftp.upload.activeFile', () =>
+  uploads.push(['command', vscode.window.activeTextEditor.document.uri.path.split('/').pop()])
+);
+vscode.extensions.all.push({
+  id: 'Natizyskunk.sftp',
+  packageJSON: {
+    displayName: 'SFTP',
+    contributes: {
+      commands: [
+        { command: 'sftp.upload.activeFile', title: 'Upload Active File', category: 'SFTP' },
+        { command: 'sftp.internal', title: 'Internal Thing', category: 'SFTP' },
+      ],
+      menus: { commandPalette: [{ command: 'sftp.internal', when: 'false' }] },
+    },
+  },
+});
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const shots = process.env.SHOTS || '';
@@ -139,6 +159,32 @@ await page.click('.cm-line:has-text("print(x)")');
 await page.keyboard.press('End');
 await page.keyboard.type(' -- hi');
 check('edit second file (lua)', await until(() => luaDoc.getText() === 'local x = 1\nprint(x) -- hi\n'), JSON.stringify(luaDoc.getText()));
+
+// --- installed extensions keep working
+uploads.length = 0;
+await page.keyboard.type(' -- upload me');
+await page.click('#save');
+check('save from phone triggers SFTP upload-on-save', await until(() => uploads.some(([k, f]) => k === 'on-save' && f === 'main.lua')), JSON.stringify(uploads));
+
+await page.click('#cmd');
+await page.fill('#cmdSearch', 'sftp upload');
+check('extension commands listed on phone', await until(() => page.isVisible('#cmdList .file:has-text("SFTP: Upload Active File")')));
+check('hidden extension commands not listed', !(await page.isVisible('#cmdList .file:has-text("Internal Thing")')));
+if (shots) await page.screenshot({ path: path.join(shots, 'commands.png') });
+await page.click('#cmdList .file:has-text("SFTP: Upload Active File")');
+check('phone runs extension command on the phone\'s file', await until(() => uploads.some(([k, f]) => k === 'command' && f === 'main.lua')), JSON.stringify(uploads));
+check('command result shown', await until(async () => (await page.textContent('#toast')).includes('รันแล้ว')));
+
+setDiagnostics(luaDoc, [
+  { range: [1, 0, 1, 5], severity: 0, message: "undefined global 'print'", source: 'Lua' },
+  { range: [0, 6, 0, 7], severity: 1, message: 'unused local x', source: 'Lua' },
+]);
+check('problems from extensions underlined on phone', await until(() => page.isVisible('.cm-lintRange-error')));
+check('problem count shown', await until(async () => (await page.textContent('#problems')) === '✖1 ⚠1'));
+await page.click('#problems');
+check('problem list opens', await until(() => page.isVisible('.cm-panel-lint')));
+if (shots) await page.screenshot({ path: path.join(shots, 'problems.png') });
+await page.keyboard.press('Escape');
 
 if (shots) {
   await page.screenshot({ path: path.join(shots, 'editor.png') });

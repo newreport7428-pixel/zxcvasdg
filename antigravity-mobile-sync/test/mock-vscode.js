@@ -59,6 +59,9 @@ const onSave = new Emitter();
 const onClose = new Emitter();
 const onTabs = new Emitter();
 const onActive = new Emitter();
+const onDiag = new Emitter();
+const diagMap = new Map();
+const commandRegistry = new Map();
 
 class TextDocument {
   constructor(uri, text, languageId) {
@@ -159,6 +162,12 @@ const workspace = {
   getWorkspaceFolder(u) {
     return u.path.startsWith('/proj/') ? { uri: Uri.file('/proj') } : undefined;
   },
+  async save(uri) {
+    const d = docs.find((x) => x.uri.toString() === uri.toString());
+    if (!d) return undefined;
+    await d.save();
+    return d.uri;
+  },
   async openTextDocument(u) {
     const d = docs.find((x) => x.uri.toString() === u.toString());
     if (!d) throw new Error('not found');
@@ -193,8 +202,31 @@ async function pcInsert(doc, line, ch, text) {
   return workspace.applyEdit(we);
 }
 
+const commands = {
+  registerCommand(id, fn) {
+    commandRegistry.set(id, fn);
+    return { dispose: () => commandRegistry.delete(id) };
+  },
+  async executeCommand(id, ...args) {
+    const fn = commandRegistry.get(id);
+    if (!fn) throw new Error(`command '${id}' not found`);
+    return fn(...args);
+  },
+};
+const languages = {
+  getDiagnostics: (uri) => diagMap.get(uri.toString()) || [],
+  onDidChangeDiagnostics: onDiag.event,
+};
+const extensions = { all: [] };
+
+function setDiagnostics(doc, list) {
+  diagMap.set(doc.uri.toString(), list.map((d) => ({ ...d, range: new Range(...d.range) })));
+  onDiag.fire({ uris: [doc.uri] });
+}
+
 module.exports = {
-  vscode: { Range, Position, Uri, EndOfLine, WorkspaceEdit, TabInputText, workspace, window },
+  vscode: { Range, Position, Uri, EndOfLine, WorkspaceEdit, TabInputText, workspace, window, commands, languages, extensions },
+  setDiagnostics,
   addDoc,
   pcInsert,
 };
