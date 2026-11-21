@@ -19,6 +19,11 @@
   "contributes": {
     "commands": [
       {
+        "command": "mobileSync.menu",
+        "title": "Menu",
+        "category": "Mobile Sync"
+      },
+      {
         "command": "mobileSync.start",
         "title": "Start",
         "category": "Mobile Sync"

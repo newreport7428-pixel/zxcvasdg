@@ -39,12 +39,12 @@ function updateStatus() {
     const n = server.clientCount();
     const vps = relay ? { online: ' · VPS ✓', connecting: ' · VPS …', offline: ' · VPS ✗', denied: ' · VPS ✗' }[relay.status] : '';
     statusItem.text = `$(device-mobile) Mobile Sync: ${n ? n + ' connected' : 'on'}${vps}`;
-    statusItem.tooltip = 'Mobile Sync is running — click for QR code / link';
-    statusItem.command = 'mobileSync.showLink';
+    statusItem.tooltip = 'Mobile Sync กำลังทำงาน — กดเพื่อเปิดเมนู';
+    statusItem.command = 'mobileSync.menu';
   } else {
     statusItem.text = '$(device-mobile) Mobile Sync: off';
-    statusItem.tooltip = 'Click to start Mobile Sync';
-    statusItem.command = 'mobileSync.start';
+    statusItem.tooltip = 'กดเพื่อเปิดเมนู Mobile Sync';
+    statusItem.command = 'mobileSync.menu';
   }
   statusItem.show();
 }
@@ -212,6 +212,26 @@ ${items}
 </body></html>`;
 }
 
+// One touch-friendly menu for everything (handy over remote desktop, no shortcuts needed).
+async function menu(context) {
+  const running = server && server.listening;
+  const hasRelay = !!(await context.secrets.get(RELAY_KEY));
+  const items = [];
+  if (!running) items.push({ label: '$(play) เริ่ม Mobile Sync', run: () => start(context) });
+  else {
+    items.push({ label: '$(device-mobile) แสดง QR / ลิงก์สำหรับมือถือ', run: () => showLink() });
+    items.push({ label: '$(debug-stop) หยุด Mobile Sync', run: () => stop() });
+  }
+  items.push({
+    label: hasRelay ? '$(globe) เปลี่ยนข้อความเชื่อมต่อ VPS' : '$(globe) เชื่อมต่อผ่าน VPS (วางข้อความจาก VPS)',
+    run: () => connectRelay(context),
+  });
+  if (hasRelay) items.push({ label: '$(close) เลิกใช้ VPS', run: () => disconnectRelay(context) });
+  items.push({ label: '$(key) สร้างรหัสลับใหม่ (ลิงก์/QR เก่าใช้ไม่ได้)', run: () => vscode.commands.executeCommand('mobileSync.resetToken') });
+  const pick = await vscode.window.showQuickPick(items, { title: 'Mobile Sync', placeHolder: 'เลือกคำสั่ง' });
+  if (pick) await pick.run();
+}
+
 function activate(context) {
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   context.subscriptions.push(statusItem);
@@ -221,6 +241,7 @@ function activate(context) {
     vscode.commands.registerCommand('mobileSync.start', () => start(context)),
     vscode.commands.registerCommand('mobileSync.stop', () => stop()),
     vscode.commands.registerCommand('mobileSync.showLink', () => showLink()),
+    vscode.commands.registerCommand('mobileSync.menu', () => menu(context)),
     vscode.commands.registerCommand('mobileSync.connectRelay', () => connectRelay(context)),
     vscode.commands.registerCommand('mobileSync.disconnectRelay', () => disconnectRelay(context)),
     vscode.commands.registerCommand('mobileSync.resetToken', async () => {
