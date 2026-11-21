@@ -3,7 +3,7 @@
   "short_name": "Mobile Sync",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#282c34",
-  "theme_color": "#21252b",
+  "background_color": "#1f1f1f",
+  "theme_color": "#181818",
   "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml" }]
 }

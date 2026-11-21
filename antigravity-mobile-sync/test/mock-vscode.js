@@ -132,6 +132,8 @@ function refreshTabs() {
 }
 
 const workspace = {
+  name: 'proj',
+  fs: { readFile: async () => { throw new Error('not in mock'); } },
   get textDocuments() {
     return docs;
   },
@@ -214,7 +216,7 @@ const commands = {
   },
 };
 const languages = {
-  getDiagnostics: (uri) => diagMap.get(uri.toString()) || [],
+  getDiagnostics: (uri) => (uri ? diagMap.get(uri.toString()) || [] : [...diagMap].map(([k, v]) => [Uri.parse(k), v])),
   onDidChangeDiagnostics: onDiag.event,
 };
 const extensions = { all: [] };

@@ -186,13 +186,60 @@ check('problem list opens', await until(() => page.isVisible('.cm-panel-lint')))
 if (shots) await page.screenshot({ path: path.join(shots, 'problems.png') });
 await page.keyboard.press('Escape');
 
+// --- IDE-like side bar: Explorer tree, Search, Extensions, Problems, status bar
+const openView = async (name) => {
+  if (!(await page.$eval('#side', (e) => e.classList.contains('open')))) await page.click('#menu');
+  await page.click(`#activity [data-view=${name}]`);
+};
+await openView('explorer');
+check('explorer shows workspace folder tree', await until(() => page.isVisible('#tree .node.folder:has-text("src")')));
+check('explorer shows workspace name', (await page.textContent('#wsName')) === 'PROJ');
+await page.click('#collapseAll');
+check('collapse all hides files inside folders', await until(async () => !(await page.isVisible('#tree .node.leaf:has-text("app.js")'))));
+await page.click('#tree .node.folder:has-text("src")');
+check('tapping a folder expands it', await until(() => page.isVisible('#tree .node.leaf:has-text("app.js")')));
+if (shots) await page.screenshot({ path: path.join(shots, 'explorer.png') });
+await page.click('#tree .node.leaf:has-text("app.js")');
+check('tapping a file in the tree opens it', await until(async () => (await page.textContent('#title')) === 'app.js'));
+check('side bar closes after opening a file on a phone', await until(async () => !(await page.$eval('#side', (e) => e.classList.contains('open')))));
+
+await openView('search');
+await page.fill('#search', 'return 1');
+check('text search finds matches in files', await until(() => page.isVisible('#results .node.match')), await page.textContent('#searchInfo'));
+if (shots) await page.screenshot({ path: path.join(shots, 'search.png') });
+await page.click('#results .node.match');
+const expectLine = (await phoneText()).split('\n').findIndex((l) => l.includes('return 1')) + 1;
+check('tapping a result jumps to that line', await until(async () => (await page.textContent('#sbPos')).startsWith(`Ln ${expectLine},`)), await page.textContent('#sbPos'));
+check('status bar shows language', (await page.textContent('#sbLang')) === 'JavaScript');
+
+await openView('extensions');
+check('extensions view lists installed extensions', await until(() => page.isVisible('#extList .ext:has-text("SFTP")')));
+await page.click('#extList .ext:has-text("SFTP")');
+check('extension shows its commands', await until(() => page.isVisible('.extCmd:has-text("Upload Active File")')));
+if (shots) await page.screenshot({ path: path.join(shots, 'extensions.png') });
+uploads.length = 0;
+await page.click('.extCmd:has-text("Upload Active File")');
+check('run extension command from Extensions view', await until(() => uploads.some(([k, f]) => k === 'command' && f === 'app.js')), JSON.stringify(uploads));
+
+await openView('problems');
+check('problems view lists workspace problems', await until(() => page.isVisible('#probList .problem:has-text("undefined global")')));
+check('status bar shows problem totals', await until(async () => (await page.textContent('#sbProblems')).includes('✖ 1')), await page.textContent('#sbProblems'));
+if (shots) await page.screenshot({ path: path.join(shots, 'problems-view.png') });
+await page.click('#probList .problem:has-text("undefined global")');
+check('tapping a problem opens the file there', await until(async () => (await page.textContent('#title')) === 'main.lua' && (await page.textContent('#sbPos')).startsWith('Ln 2,')), await page.textContent('#sbPos'));
+if (shots) await page.screenshot({ path: path.join(shots, 'editor.png') });
 if (shots) {
-  await page.screenshot({ path: path.join(shots, 'editor.png') });
-  await page.click('#menu');
-  await page.fill('#search', 'app');
-  await wait(300);
-  await page.screenshot({ path: path.join(shots, 'drawer.png') });
-  await page.click('#scrim', { position: { x: 370, y: 300 } });
+  // tablet / landscape: side bar docked next to the editor, like the desktop IDE
+  const tab = await browser.newContext({ ...devices['iPad Pro 11 landscape'] });
+  const tp = await tab.newPage();
+  await tp.goto(`${base}/#t=${token}`);
+  await until(() => tp.$eval('#status', (e) => e.dataset.state === 'online'));
+  if (!(await tp.isVisible('#tree'))) await tp.click('#activity [data-view=explorer]');
+  check('tablet: side bar docked next to the editor', await until(() => tp.isVisible('#tree .node')));
+  await tp.click('#tree .node.leaf:has-text("main.lua")').catch(() => {});
+  await wait(600);
+  await tp.screenshot({ path: path.join(shots, 'tablet.png') });
+  await tab.close();
 }
 
 // --- reconnect after server restart keeps working
@@ -218,7 +265,7 @@ await pcInsert(luaDoc, 0, 0, '-- typed during reload\n');
 check('PC edit during phone reload is kept', await until(async () => (await phoneText()).startsWith('-- typed during reload\n-- after reconnect')), JSON.stringify(await phoneText()));
 
 const lateDoc = addDoc('/proj/late.txt', 'first line\n', 'plaintext');
-await page.click('#menu');
+await openView('explorer');
 await page.click('#pcTabs .file:has-text("late.txt")');
 await wait(150);
 await pcInsert(lateDoc, 0, 0, 'typed while opening\n');

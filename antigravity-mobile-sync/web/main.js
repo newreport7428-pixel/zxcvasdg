@@ -4,7 +4,7 @@ import { EditorView, keymap } from '@codemirror/view';
 import { basicSetup } from 'codemirror';
 import { indentWithTab, undo, redo, indentMore, indentLess } from '@codemirror/commands';
 import { StreamLanguage } from '@codemirror/language';
-import { oneDark } from '@codemirror/theme-one-dark';
+import { vscodeDark } from '@uiw/codemirror-theme-vscode';
 import { setDiagnostics, lintGutter, openLintPanel } from '@codemirror/lint';
 import { javascript } from '@codemirror/lang-javascript';
 import { python } from '@codemirror/lang-python';
@@ -183,7 +183,7 @@ function extensionsFor(d) {
   return [
     basicSetup,
     keymap.of([indentWithTab]),
-    oneDark,
+    vscodeDark,
     wrapComp.of(prefs.wrap ? EditorView.lineWrapping : []),
     lintGutter(),
     languageFor(d.languageId, d.path),
@@ -191,6 +191,7 @@ function extensionsFor(d) {
       for (const tr of u.transactions) {
         if (tr.docChanged && !tr.annotation(Remote)) localChange(d, tr);
       }
+      if (u.selectionSet || u.docChanged) renderCursor();
     }),
   ];
 }
@@ -342,8 +343,11 @@ function markClosed(d) {
 }
 
 // ---------------------------------------------------------------- documents
-async function openDoc(uri, { quiet = false } = {}) {
-  if (docs.has(uri)) return showDoc(uri);
+async function openDoc(uri, { quiet = false, line, col, len } = {}) {
+  if (docs.has(uri)) {
+    showDoc(uri);
+    return reveal(line, col, len);
+  }
   if (opening.has(uri)) return;
   opening.set(uri, []);
   let data;
@@ -373,6 +377,18 @@ async function openDoc(uri, { quiet = false } = {}) {
   applyDiags(d, data.diags || []);
   showDoc(uri);
   replay(d, early);
+  reveal(line, col, len);
+}
+
+// Jump to a position (from search results or problems).
+function reveal(line, col = 0, len = 0) {
+  if (line === undefined || line === null) return;
+  const text = view.state.doc;
+  if (line + 1 > text.lines) return;
+  const l = text.line(line + 1);
+  const from = l.from + Math.min(col, l.length);
+  const to = Math.min(l.to, from + len);
+  view.dispatch({ selection: { anchor: from, head: to }, effects: EditorView.scrollIntoView(from, { y: 'center' }) });
 }
 
 function showDoc(uri) {
@@ -384,7 +400,9 @@ function showDoc(uri) {
   store.set('current', current);
   renderTabs();
   renderHeader();
-  closeDrawer();
+  renderCursor();
+  revealInExplorer(d.path);
+  closeSidebarOnPhone();
 }
 
 function closeDoc(uri) {
@@ -526,6 +544,7 @@ function connect() {
   es = new EventSource(`/api/events?t=${encodeURIComponent(token)}&c=${clientId}`);
   es.onopen = () => {
     setStatus('online');
+    scheduleProblems();
     if (everConnected) for (const d of docs.values()) resync(d);
     everConnected = true;
   };
@@ -567,6 +586,9 @@ function connect() {
         }
         break;
       }
+      case 'problems':
+        scheduleProblems();
+        break;
       case 'diag': {
         const d = docs.get(ev.uri);
         if (d) applyDiags(d, ev.diags);
@@ -604,9 +626,19 @@ function setStatus(s) {
   const dot = $('#status');
   dot.dataset.state = s;
   dot.title = { online: 'เชื่อมต่อแล้ว', offline: 'ไม่ได้เชื่อมต่อ', connecting: 'กำลังเชื่อมต่อ…' }[s];
+  const sb = $('#sbConn');
+  sb.dataset.state = s;
+  sb.textContent = { online: '● เชื่อมต่อกับคอมแล้ว', offline: '● ไม่ได้เชื่อมต่อ', connecting: '● กำลังเชื่อมต่อ…' }[s];
 }
 
-// ---------------------------------------------------------------- UI
+// ---------------------------------------------------------------- UI: title bar, tabs, status bar
+const LANG_NAMES = {
+  javascript: 'JavaScript', javascriptreact: 'JavaScript JSX', typescript: 'TypeScript', typescriptreact: 'TypeScript JSX',
+  python: 'Python', lua: 'Lua', json: 'JSON', jsonc: 'JSON with Comments', markdown: 'Markdown', html: 'HTML', css: 'CSS',
+  scss: 'SCSS', less: 'Less', plaintext: 'Plain Text', shellscript: 'Shell Script', powershell: 'PowerShell', csharp: 'C#',
+  cpp: 'C++', c: 'C', php: 'PHP', sql: 'SQL', yaml: 'YAML', xml: 'XML', go: 'Go', rust: 'Rust', java: 'Java',
+};
+
 function renderHeader() {
   const d = current && docs.get(current);
   $('#title').textContent = d ? d.path.split('/').pop() : 'Mobile Sync';
@@ -622,6 +654,16 @@ function renderHeader() {
     const td = docs.get(tab.dataset.uri);
     tab.classList.toggle('dirty', !!(td && td.dirty));
   }
+  $('#sbLang').textContent = d ? LANG_NAMES[d.languageId] || d.languageId : '';
+}
+
+function renderCursor() {
+  const d = current && docs.get(current);
+  if (!d) return ($('#sbPos').textContent = '');
+  const sel = view.state.selection.main;
+  const line = view.state.doc.lineAt(sel.head);
+  const n = Math.abs(sel.to - sel.from);
+  $('#sbPos').textContent = `Ln ${line.number}, Col ${sel.head - line.from + 1}${n ? ` (${n} selected)` : ''}`;
 }
 
 function renderTabs() {
@@ -633,20 +675,98 @@ function renderTabs() {
         e.stopPropagation();
         closeDoc(d.uri);
       };
-      const tab = el('div', { className: 'tab' + (d.uri === current ? ' on' : '') }, el('span', { textContent: d.path.split('/').pop() }), close);
+      const name = d.path.split('/').pop();
+      const tab = el('div', { className: 'tab' + (d.uri === current ? ' on' : '') }, fileIcon(name), el('span', { textContent: name }), close);
       tab.dataset.uri = d.uri;
+      tab.title = d.path;
       tab.onclick = () => showDoc(d.uri);
       return tab;
     })
   );
   box.hidden = docs.size === 0;
   box.querySelector('.on')?.scrollIntoView({ inline: 'nearest', block: 'nearest' });
+  $('#welcome').hidden = docs.size > 0;
 }
+
+// ---------------------------------------------------------------- file icons (Seti-like colors)
+const ICONS = {
+  js: ['JS', '#e8d44d'], mjs: ['JS', '#e8d44d'], cjs: ['JS', '#e8d44d'], ts: ['TS', '#3178c6'], mts: ['TS', '#3178c6'],
+  jsx: ['⚛', '#61dafb'], tsx: ['⚛', '#61dafb'], py: ['PY', '#4b8bbe'], lua: ['☾', '#6b7cff'], luau: ['☾', '#00a2ff'],
+  json: ['{}', '#cbcb41'], jsonc: ['{}', '#cbcb41'], md: ['M↓', '#519aba'], html: ['<>', '#e44d26'], htm: ['<>', '#e44d26'],
+  css: ['#', '#42a5f5'], scss: ['#', '#cd6799'], less: ['#', '#2a4d80'], go: ['GO', '#00add8'], rs: ['RS', '#dea584'],
+  java: ['J', '#b07219'], c: ['C', '#a8b9cc'], h: ['H', '#a8b9cc'], cpp: ['C+', '#f34b7d'], cs: ['C#', '#178600'],
+  php: ['php', '#8892bf'], sql: ['DB', '#e38c00'], xml: ['<>', '#f1662a'], svg: ['<>', '#ffb13b'], yml: ['YML', '#cb171e'],
+  yaml: ['YML', '#cb171e'], sh: ['$', '#89e051'], ps1: ['>_', '#3a8bc8'], bat: ['>_', '#c1f12e'], cmd: ['>_', '#c1f12e'],
+  txt: ['≡', '#9aa0a6'], log: ['≡', '#9aa0a6'], env: ['⚙', '#faf743'], toml: ['⚙', '#9c4221'], ini: ['⚙', '#9aa0a6'],
+  png: ['▣', '#a074c4'], jpg: ['▣', '#a074c4'], jpeg: ['▣', '#a074c4'], gif: ['▣', '#a074c4'], ico: ['▣', '#a074c4'],
+  webp: ['▣', '#a074c4'], vue: ['V', '#41b883'], svelte: ['S', '#ff3e00'], rb: ['RB', '#cc342d'], kt: ['K', '#a97bff'],
+  swift: ['SW', '#f05138'], dart: ['DT', '#00b4ab'], lock: ['🔒', '#9aa0a6'], gitignore: ['G', '#f14e32'],
+};
+function fileIcon(name) {
+  const lower = name.toLowerCase();
+  const ext = lower.startsWith('.') && !lower.slice(1).includes('.') ? lower.slice(1) : lower.split('.').pop();
+  const [t, c] = ICONS[ext] || ['•', '#8b919c'];
+  return el('span', { className: 'ficon', textContent: t, style: `color:${c}` });
+}
+
+// ---------------------------------------------------------------- side bar (activity bar + views)
+const docked = window.matchMedia('(min-width: 900px)');
+let activeView = store.get('view', 'explorer');
+let sidebarShown = store.get('sidebar', true); // only used when docked
+
+function showView(name) {
+  activeView = name;
+  store.set('view', name);
+  for (const b of document.querySelectorAll('#activity button[data-view]')) b.classList.toggle('on', b.dataset.view === name);
+  for (const v of document.querySelectorAll('#sidebar .view')) v.hidden = v.dataset.view !== name;
+  if (name === 'explorer' && !fileList) loadFiles();
+  if (name === 'extensions' && !extList) loadExtensions();
+  if (name === 'problems') loadProblems();
+  if (name === 'search') setTimeout(() => $('#search').focus(), 50);
+}
+
+function openSidebar(name) {
+  if (name) showView(name);
+  else showView(activeView);
+  if (docked.matches) {
+    sidebarShown = true;
+    store.set('sidebar', true);
+    document.body.classList.remove('noSidebar');
+  } else {
+    $('#side').classList.add('open');
+    $('#scrim').hidden = false;
+  }
+}
+function closeSidebar() {
+  if (docked.matches) {
+    sidebarShown = false;
+    store.set('sidebar', false);
+    document.body.classList.add('noSidebar');
+  } else {
+    $('#side').classList.remove('open');
+    $('#scrim').hidden = true;
+  }
+}
+function closeSidebarOnPhone() {
+  if (!docked.matches) closeSidebar();
+}
+function sidebarIsOpen() {
+  return docked.matches ? sidebarShown : $('#side').classList.contains('open');
+}
+function applyLayout() {
+  document.body.classList.toggle('noSidebar', docked.matches && !sidebarShown);
+  if (docked.matches) $('#scrim').hidden = true;
+}
+
+// ---------------------------------------------------------------- Explorer
+const expanded = new Set(store.get('expanded', []));
+let wsName = '';
 
 function fileRow(path, uri, extra = '') {
   const name = path.split('/').pop();
-  const dir = path.slice(0, -name.length);
-  const row = el('button', { className: 'file' + extra }, el('span', { className: 'name', textContent: name }), el('span', { className: 'dir', textContent: dir }));
+  const dir = path.slice(0, -name.length).replace(/\/$/, '');
+  const row = el('button', { className: 'file' + extra }, fileIcon(name), el('span', { className: 'name', textContent: name }), el('span', { className: 'dir', textContent: dir }));
+  row.title = path;
   row.onclick = () => openDoc(uri);
   return row;
 }
@@ -659,40 +779,284 @@ function renderPcTabs() {
   );
 }
 
-function renderSearch() {
-  const q = $('#search').value.trim().toLowerCase();
-  const box = $('#results');
-  if (!fileList) return box.replaceChildren(el('p', { className: 'muted', textContent: 'กำลังโหลดรายชื่อไฟล์…' }));
-  const terms = q.split(/\s+/).filter(Boolean);
-  const hits = fileList.filter((f) => terms.every((t) => f.path.toLowerCase().includes(t))).slice(0, 80);
-  box.replaceChildren(
-    ...(hits.length ? hits.map((f) => fileRow(f.path, f.uri)) : [el('p', { className: 'muted', textContent: 'ไม่พบไฟล์' })])
-  );
+function buildTree(files) {
+  const root = { dirs: new Map(), files: [] };
+  for (const f of files) {
+    const parts = f.path.split('/');
+    let node = root;
+    let acc = '';
+    for (let i = 0; i < parts.length - 1; i++) {
+      acc = acc ? acc + '/' + parts[i] : parts[i];
+      if (!node.dirs.has(parts[i])) node.dirs.set(parts[i], { name: parts[i], path: acc, dirs: new Map(), files: [] });
+      node = node.dirs.get(parts[i]);
+    }
+    node.files.push({ name: parts[parts.length - 1], path: f.path, uri: f.uri });
+  }
+  return root;
+}
+let tree = null;
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+
+function renderTree() {
+  const box = $('#tree');
+  if (!fileList) return box.replaceChildren(el('p', { className: 'muted', textContent: 'กำลังโหลดไฟล์…' }));
+  if (!fileList.length) return box.replaceChildren(el('p', { className: 'muted', textContent: 'ไม่มีไฟล์ในโปรเจกต์ที่เปิดอยู่' }));
+  const curPath = current && docs.get(current) ? docs.get(current).path : null;
+  const rows = [];
+  const walk = (node, depth) => {
+    for (const dir of [...node.dirs.values()].sort(byName)) {
+      const open = expanded.has(dir.path);
+      const row = el('button', { className: 'node folder' }, el('span', { className: 'chev', textContent: open ? '▾' : '▸' }), el('span', { className: 'name', textContent: dir.name }));
+      row.style.paddingLeft = 6 + depth * 12 + 'px';
+      row.onclick = () => {
+        if (expanded.has(dir.path)) expanded.delete(dir.path);
+        else expanded.add(dir.path);
+        store.set('expanded', [...expanded]);
+        renderTree();
+      };
+      rows.push(row);
+      if (open) walk(dir, depth + 1);
+    }
+    for (const f of node.files.sort(byName)) {
+      const row = el('button', { className: 'node leaf' + (f.path === curPath ? ' selected' : '') }, fileIcon(f.name), el('span', { className: 'name', textContent: f.name }));
+      row.style.paddingLeft = 6 + depth * 12 + 14 + 'px';
+      row.title = f.path;
+      row.onclick = () => openDoc(f.uri);
+      const d = [...docs.values()].find((x) => x.path === f.path);
+      if (d && d.dirty) row.classList.add('dirty');
+      rows.push(row);
+    }
+  };
+  walk(tree, 0);
+  box.replaceChildren(...rows);
+}
+
+function revealInExplorer(path) {
+  if (!path) return;
+  const parts = path.split('/');
+  let acc = '';
+  for (let i = 0; i < parts.length - 1; i++) {
+    acc = acc ? acc + '/' + parts[i] : parts[i];
+    expanded.add(acc);
+  }
+  store.set('expanded', [...expanded]);
+  if (fileList) renderTree();
+  $('#tree .selected')?.scrollIntoView({ block: 'nearest' });
 }
 
 async function loadFiles() {
   fileList = null;
-  renderSearch();
+  renderTree();
   try {
-    fileList = (await api('/api/files')).files;
+    const res = await api('/api/files');
+    fileList = res.files;
+    wsName = res.name || '';
   } catch (err) {
     if (err instanceof AuthError) return showLogin(err.message);
     fileList = [];
     toast('โหลดรายชื่อไฟล์ไม่ได้');
   }
+  tree = buildTree(fileList);
+  $('#wsName').textContent = (wsName || 'โปรเจกต์').toUpperCase();
+  renderTree();
   renderSearch();
 }
 
-function openDrawer() {
-  $('#drawer').classList.add('open');
-  $('#scrim').hidden = false;
-  if (!fileList) loadFiles();
-}
-function closeDrawer() {
-  $('#drawer').classList.remove('open');
-  $('#scrim').hidden = true;
+function togglePane(head) {
+  const pane = head.parentElement;
+  pane.classList.toggle('collapsed');
+  head.querySelector('.chev').textContent = pane.classList.contains('collapsed') ? '▸' : '▾';
 }
 
+// ---------------------------------------------------------------- Search
+const searchOpts = { matchCase: false, wholeWord: false, regex: false, mode: 'text' };
+let searchTimer;
+let searchSeq = 0;
+
+function renderSearch() {
+  if (searchOpts.mode !== 'name') return;
+  const q = $('#search').value.trim().toLowerCase();
+  const box = $('#results');
+  $('#searchInfo').textContent = '';
+  if (!fileList) {
+    if (activeView === 'search') loadFiles();
+    return box.replaceChildren(el('p', { className: 'muted', textContent: 'กำลังโหลดรายชื่อไฟล์…' }));
+  }
+  const terms = q.split(/\s+/).filter(Boolean);
+  const hits = fileList.filter((f) => terms.every((t) => f.path.toLowerCase().includes(t))).slice(0, 100);
+  box.replaceChildren(...(hits.length ? hits.map((f) => fileRow(f.path, f.uri)) : [el('p', { className: 'muted', textContent: 'ไม่พบไฟล์' })]));
+}
+
+function onSearchInput() {
+  if (searchOpts.mode === 'name') return renderSearch();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runTextSearch, 450);
+}
+
+async function runTextSearch() {
+  const q = $('#search').value;
+  const box = $('#results');
+  if (!q.trim()) {
+    $('#searchInfo').textContent = '';
+    return box.replaceChildren();
+  }
+  const seq = ++searchSeq;
+  $('#searchInfo').textContent = 'กำลังค้นหา…';
+  let res;
+  try {
+    res = await api('/api/search', { query: q, matchCase: searchOpts.matchCase, wholeWord: searchOpts.wholeWord, regex: searchOpts.regex });
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin(err.message);
+    $('#searchInfo').textContent = 'ค้นหาไม่ได้ — ไม่ได้เชื่อมต่อ';
+    return;
+  }
+  if (seq !== searchSeq) return; // a newer search started
+  if (!res.ok) {
+    $('#searchInfo').textContent = res.error;
+    return box.replaceChildren();
+  }
+  $('#searchInfo').textContent = res.total
+    ? `${res.total} ผลลัพธ์ใน ${res.results.length} ไฟล์${res.truncated ? ' (แสดงบางส่วน)' : ''}`
+    : 'ไม่พบผลลัพธ์';
+  const rows = [];
+  for (const r of res.results) {
+    const name = r.path.split('/').pop();
+    const head = el('button', { className: 'node folder resultFile' }, el('span', { className: 'chev', textContent: '▾' }), fileIcon(name), el('span', { className: 'name', textContent: name }), el('span', { className: 'dir', textContent: r.path.slice(0, -name.length).replace(/\/$/, '') }), el('span', { className: 'count', textContent: String(r.matches.length) }));
+    const list = el('div', { className: 'resultList' });
+    head.onclick = () => {
+      list.hidden = !list.hidden;
+      head.querySelector('.chev').textContent = list.hidden ? '▸' : '▾';
+    };
+    for (const m of r.matches) {
+      const row = el('button', { className: 'node match' }, el('span', { textContent: m.pre.trimStart() }), el('mark', { textContent: m.hit }), el('span', { textContent: m.post }));
+      row.title = `บรรทัด ${m.line + 1}`;
+      row.onclick = () => openDoc(r.uri, { line: m.line, col: m.col, len: m.len });
+      list.append(row);
+    }
+    rows.push(head, list);
+  }
+  box.replaceChildren(...rows);
+}
+
+function setSearchMode(mode) {
+  searchOpts.mode = mode;
+  $('#modeText').classList.toggle('on', mode === 'text');
+  $('#modeName').classList.toggle('on', mode === 'name');
+  $('#searchOpts').hidden = mode === 'name';
+  $('#search').placeholder = mode === 'name' ? 'พิมพ์ชื่อไฟล์…' : 'ค้นหาข้อความในทุกไฟล์…';
+  $('#results').replaceChildren();
+  onSearchInput();
+}
+
+// ---------------------------------------------------------------- Extensions
+let extList = null;
+
+async function loadExtensions() {
+  extList = null;
+  renderExtensions();
+  try {
+    extList = (await api('/api/extensions')).extensions;
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin(err.message);
+    extList = [];
+    toast('โหลดรายการส่วนขยายไม่ได้');
+  }
+  if (!commandList) await loadCommands();
+  renderExtensions();
+}
+
+const AVATAR_COLORS = ['#007acc', '#68217a', '#16825d', '#c72e0f', '#b8860b', '#0e639c', '#8e44ad', '#2e7d32'];
+function avatar(name) {
+  const h = [...name].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+  return el('span', { className: 'avatar', textContent: (name.trim()[0] || '?').toUpperCase(), style: `background:${AVATAR_COLORS[h % AVATAR_COLORS.length]}` });
+}
+
+function renderExtensions() {
+  const box = $('#extList');
+  if (!extList) return box.replaceChildren(el('p', { className: 'muted', textContent: 'กำลังโหลด…' }));
+  const q = $('#extSearch').value.trim().toLowerCase();
+  const showBuiltin = $('#extBuiltin').checked;
+  const items = extList.filter(
+    (x) => (showBuiltin || !x.builtin) && (!q || (x.name + ' ' + x.id + ' ' + x.description).toLowerCase().includes(q))
+  );
+  $('#extCount').textContent = String(items.length);
+  box.replaceChildren(
+    ...(items.length
+      ? items.map((x) => {
+          const cmds = (commandList || []).filter((c) => c.extId === x.id);
+          const body = el('div', { className: 'extBody' });
+          body.hidden = true;
+          if (x.description) body.append(el('p', { className: 'desc', textContent: x.description }));
+          body.append(el('p', { className: 'muted small', textContent: x.id + (x.active ? ' · ทำงานอยู่' : ' · ยังไม่ทำงาน') }));
+          if (cmds.length) {
+            for (const c of cmds) {
+              const b = el('button', { className: 'extCmd', textContent: '▶ ' + c.title });
+              b.onclick = () => runCommand(c);
+              body.append(b);
+            }
+          } else body.append(el('p', { className: 'muted small', textContent: 'ส่วนขยายนี้ไม่มีคำสั่งให้รัน' }));
+          const head = el(
+            'button',
+            { className: 'ext' },
+            avatar(x.name),
+            el(
+              'span',
+              { className: 'extText' },
+              el('span', { className: 'name', textContent: x.name }),
+              el('span', { className: 'dir', textContent: [x.publisher, x.version && 'v' + x.version].filter(Boolean).join(' · ') })
+            ),
+            el('span', { className: 'extState' + (x.active ? ' on' : ''), title: x.active ? 'ทำงานอยู่' : 'ยังไม่ทำงาน' }),
+            el('span', { className: 'count', textContent: cmds.length ? String(cmds.length) : '' })
+          );
+          head.onclick = () => (body.hidden = !body.hidden);
+          return el('div', { className: 'extItem' }, head, body);
+        })
+      : [el('p', { className: 'muted', textContent: 'ไม่พบส่วนขยาย' })])
+  );
+}
+
+// ---------------------------------------------------------------- Problems
+let problemsTimer;
+function scheduleProblems() {
+  clearTimeout(problemsTimer);
+  problemsTimer = setTimeout(loadProblems, 400);
+}
+
+async function loadProblems() {
+  let res;
+  try {
+    res = await api('/api/problems');
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin(err.message);
+    return;
+  }
+  $('#sbProblems').textContent = `✖ ${res.errors}  ⚠ ${res.warnings}`;
+  const badge = $('#actProblems');
+  badge.hidden = !(res.errors + res.warnings);
+  badge.textContent = String(res.errors + res.warnings);
+  const box = $('#probList');
+  if (!res.files.length) return box.replaceChildren(el('p', { className: 'muted', textContent: 'ไม่พบปัญหาในโปรเจกต์' }));
+  const rows = [];
+  for (const f of res.files) {
+    const name = f.path.split('/').pop();
+    const head = el('button', { className: 'node folder' }, el('span', { className: 'chev', textContent: '▾' }), fileIcon(name), el('span', { className: 'name', textContent: name }), el('span', { className: 'dir', textContent: f.path.slice(0, -name.length).replace(/\/$/, '') }), el('span', { className: 'count', textContent: String(f.items.length) }));
+    const list = el('div');
+    head.onclick = () => {
+      list.hidden = !list.hidden;
+      head.querySelector('.chev').textContent = list.hidden ? '▸' : '▾';
+    };
+    for (const it of f.items) {
+      const icon = { error: '✖', warning: '⚠', info: 'ℹ', hint: '💡' }[it.severity] || 'ℹ';
+      const row = el('button', { className: 'node problem ' + it.severity }, el('span', { className: 'sev', textContent: icon }), el('span', { className: 'msg', textContent: it.message }), el('span', { className: 'dir', textContent: `${it.source ? it.source + ' ' : ''}[${it.line + 1}, ${it.col + 1}]` }));
+      row.onclick = () => openDoc(f.uri, { line: it.line, col: it.col });
+      list.append(row);
+    }
+    rows.push(head, list);
+  }
+  box.replaceChildren(...rows);
+}
+
+// ---------------------------------------------------------------- settings
 function applyPrefs() {
   document.documentElement.style.setProperty('--fs', prefs.fontSize + 'px');
   $('#wrap').checked = prefs.wrap;
@@ -755,16 +1119,52 @@ function showLogin(reason) {
 }
 
 function wire() {
-  $('#menu').onclick = openDrawer;
-  $('#scrim').onclick = closeDrawer;
+  $('#menu').onclick = () => (sidebarIsOpen() ? closeSidebar() : openSidebar());
+  $('#scrim').onclick = closeSidebar;
+  for (const b of document.querySelectorAll('#activity button[data-view]')) {
+    b.onclick = () => {
+      // Like VS Code: clicking the active icon again hides the side bar.
+      if (b.dataset.view === activeView && docked.matches && sidebarShown) closeSidebar();
+      else openSidebar(b.dataset.view);
+    };
+  }
+  for (const h of document.querySelectorAll('.paneHead')) h.onclick = () => togglePane(h);
+  $('#reload').onclick = loadFiles;
+  $('#collapseAll').onclick = () => {
+    expanded.clear();
+    store.set('expanded', []);
+    renderTree();
+  };
   $('#save').onclick = saveCurrent;
   $('#cmd').onclick = openCommands;
   $('#cmdClose').onclick = closeCommands;
   $('#cmdReload').onclick = loadCommands;
   $('#cmdSearch').oninput = renderCommands;
   $('#problems').onclick = () => openLintPanel(view);
-  $('#search').oninput = renderSearch;
-  $('#reload').onclick = loadFiles;
+  $('#sbProblems').onclick = () => openSidebar('problems');
+  $('#search').oninput = onSearchInput;
+  $('#search').onkeydown = (e) => {
+    if (e.key === 'Enter' && searchOpts.mode === 'text') {
+      clearTimeout(searchTimer);
+      runTextSearch();
+    }
+  };
+  $('#modeText').onclick = () => setSearchMode('text');
+  $('#modeName').onclick = () => setSearchMode('name');
+  for (const [id, key] of [['#optCase', 'matchCase'], ['#optWord', 'wholeWord'], ['#optRegex', 'regex']]) {
+    $(id).onclick = () => {
+      searchOpts[key] = !searchOpts[key];
+      $(id).classList.toggle('on', searchOpts[key]);
+      onSearchInput();
+    };
+  }
+  $('#extSearch').oninput = renderExtensions;
+  $('#extBuiltin').onchange = renderExtensions;
+  $('#extReload').onclick = async () => {
+    commandList = null;
+    await loadExtensions();
+  };
+  $('#probReload').onclick = loadProblems;
   $('#wrap').onchange = (e) => setWrap(e.target.checked);
   $('#follow').onchange = (e) => {
     prefs.follow = e.target.checked;
@@ -798,10 +1198,19 @@ function wire() {
     $('#login').hidden = true;
     connect();
   };
+  docked.addEventListener('change', applyLayout);
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       saveCurrent();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'F' || e.key === 'f')) {
+      e.preventDefault();
+      openSidebar('search');
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'b' || e.key === 'B')) {
+      e.preventDefault();
+      sidebarIsOpen() ? closeSidebar() : openSidebar();
     }
   });
   // Warn before leaving with edits that have not reached the computer yet.
@@ -813,6 +1222,9 @@ function wire() {
 wire();
 buildKeybar();
 applyPrefs();
+applyLayout();
+showView(activeView);
 renderHeader();
+renderTabs();
 if (token) connect();
 else showLogin();

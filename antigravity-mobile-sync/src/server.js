@@ -178,6 +178,13 @@ class SyncServer {
             const uri = u.toString();
             if (this.watched.has(uri)) this.broadcast({ type: 'diag', uri, diags: this.diagnostics(u) });
           }
+          // Let the Problems view know something changed (at most once a second).
+          if (!this.problemsTimer) {
+            this.problemsTimer = setTimeout(() => {
+              this.problemsTimer = null;
+              this.broadcast({ type: 'problems' });
+            }, 1000);
+          }
         })
       );
     }
@@ -255,8 +262,10 @@ class SyncServer {
     const route = `${req.method} ${url.pathname}`;
     if (route === 'GET /api/events') return this.events(req, res, url, address);
     if (route === 'GET /api/tabs') return this.json(res, { tabs: this.tabs(), active: this.activeUri() });
-    if (route === 'GET /api/files') return this.json(res, { files: await this.files() });
+    if (route === 'GET /api/files') return this.json(res, { files: await this.files(), name: this.vscode.workspace.name || '' });
     if (route === 'GET /api/commands') return this.json(res, this.commandList());
+    if (route === 'GET /api/extensions') return this.json(res, this.extensionList());
+    if (route === 'GET /api/problems') return this.json(res, this.problems());
     if (req.method !== 'POST') return this.fail(res, 404, 'not found');
 
     const body = await readJson(req);
@@ -264,6 +273,7 @@ class SyncServer {
     if (route === 'POST /api/edit') return this.json(res, await this.edit(body));
     if (route === 'POST /api/save') return this.json(res, await this.save(body));
     if (route === 'POST /api/run') return this.json(res, await this.run(body));
+    if (route === 'POST /api/search') return this.json(res, await this.search(body));
     return this.fail(res, 404, 'not found');
   }
 
@@ -417,11 +427,11 @@ class SyncServer {
     const allow = this.opts.allowCommands !== false;
     if (!allow) return { allowed: false, commands: [] };
     const out = new Map();
-    const add = (id, title, category, ext) => {
+    const add = (id, title, category, ext, extId) => {
       if (!id || !title || out.has(id)) return;
-      out.set(id, { id, title: category ? `${category}: ${title}` : title, ext });
+      out.set(id, { id, title: category ? `${category}: ${title}` : title, ext, extId });
     };
-    for (const [id, title] of BUILTIN_COMMANDS) add(id, title, '', 'Antigravity');
+    for (const [id, title] of BUILTIN_COMMANDS) add(id, title, '', 'Antigravity', '');
     for (const ext of vs.extensions ? vs.extensions.all : []) {
       const pj = ext.packageJSON || {};
       const contributes = pj.contributes || {};
@@ -434,10 +444,116 @@ class SyncServer {
         const title = typeof c.title === 'string' ? c.title : c.title && c.title.value;
         const cat = typeof c.category === 'string' ? c.category : c.category && c.category.value;
         if (!title || title.startsWith('%')) continue;
-        add(c.command, title, cat && !cat.startsWith('%') ? cat : '', pj.displayName || pj.name || ext.id);
+        add(c.command, title, cat && !cat.startsWith('%') ? cat : '', extName(ext), ext.id);
       }
     }
     return { allowed: true, commands: [...out.values()].sort((a, b) => a.title.localeCompare(b.title)) };
+  }
+
+  // Installed extensions, like the Extensions view.
+  extensionList() {
+    const vs = this.vscode;
+    const list = (vs.extensions ? vs.extensions.all : []).map((ext) => {
+      const pj = ext.packageJSON || {};
+      const p = String(ext.extensionPath || '').replace(/\\/g, '/');
+      const str = (v) => (typeof v === 'string' && !v.startsWith('%') ? v : '');
+      return {
+        id: ext.id,
+        name: extName(ext),
+        publisher: str(pj.publisher) || ext.id.split('.')[0],
+        version: str(pj.version),
+        description: str(pj.description).slice(0, 300),
+        active: !!ext.isActive,
+        builtin: !!pj.isBuiltin || /\/resources\/app\/extensions\//.test(p),
+      };
+    });
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    return { extensions: list };
+  }
+
+  // Every problem in the workspace, like the Problems panel.
+  problems() {
+    const vs = this.vscode;
+    if (!vs.languages || !vs.languages.getDiagnostics) return { files: [], errors: 0, warnings: 0 };
+    const sev = ['error', 'warning', 'info', 'hint'];
+    let errors = 0;
+    let warnings = 0;
+    const files = [];
+    for (const [uri, diags] of vs.languages.getDiagnostics()) {
+      if (!diags.length || (uri.scheme !== 'file' && uri.scheme !== 'untitled')) continue;
+      if (uri.scheme === 'file' && !vs.workspace.getWorkspaceFolder(uri) && !this.tabs().some((t) => t.uri === uri.toString())) continue;
+      const items = diags.slice(0, 200).map((d) => {
+        const severity = sev[d.severity] || 'info';
+        if (severity === 'error') errors++;
+        if (severity === 'warning') warnings++;
+        return {
+          line: d.range.start.line,
+          col: d.range.start.character,
+          severity,
+          message: String(d.message).slice(0, 500),
+          source: d.source ? String(d.source) : '',
+        };
+      });
+      files.push({ uri: uri.toString(), path: uri.scheme === 'file' ? vs.workspace.asRelativePath(uri) : uri.path, items });
+      if (files.length >= 300) break;
+    }
+    files.sort((a, b) => a.path.localeCompare(b.path));
+    return { files, errors, warnings };
+  }
+
+  // Text search across the workspace, like the Search view. Unsaved text of open files is used.
+  async search({ query, matchCase, regex, wholeWord }) {
+    const vs = this.vscode;
+    if (typeof query !== 'string' || !query || query.length > 500) return { ok: false, error: 'bad query' };
+    let re;
+    try {
+      let src = regex ? query : query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (wholeWord) src = `\\b(?:${src})\\b`;
+      re = new RegExp(src, matchCase ? 'g' : 'gi');
+    } catch (err) {
+      return { ok: false, error: 'regex ไม่ถูกต้อง: ' + err.message };
+    }
+    const started = Date.now();
+    const results = [];
+    let total = 0;
+    let truncated = false;
+    const uris = await vs.workspace.findFiles('**/*', FILE_EXCLUDE, 20000);
+    for (const uri of uris) {
+      if (total >= 1000 || Date.now() - started > 8000) {
+        truncated = true;
+        break;
+      }
+      let text;
+      const open = this.findDoc(uri.toString());
+      if (open) text = open.getText();
+      else {
+        try {
+          const bytes = await vs.workspace.fs.readFile(uri);
+          if (bytes.length > 1024 * 1024 || bytes.subarray(0, 8000).includes(0)) continue;
+          text = new TextDecoder('utf-8').decode(bytes);
+        } catch {
+          continue;
+        }
+      }
+      const matches = [];
+      const lines = text.split(/\r?\n/);
+      for (let i = 0; i < lines.length && total < 1000; i++) {
+        const line = lines[i];
+        re.lastIndex = 0;
+        let m;
+        while ((m = re.exec(line)) && total < 1000) {
+          if (!m[0].length) {
+            re.lastIndex++;
+            continue;
+          }
+          const from = Math.max(0, m.index - 40);
+          matches.push({ line: i, col: m.index, len: m[0].length, pre: line.slice(from, m.index), hit: m[0], post: line.slice(m.index + m[0].length, m.index + m[0].length + 80) });
+          total++;
+        }
+      }
+      if (matches.length) results.push({ uri: uri.toString(), path: vs.workspace.asRelativePath(uri), matches });
+    }
+    return { ok: true, results, total, truncated };
   }
 
   // Run a command on the computer with the phone's current file as the active editor.
@@ -468,6 +584,12 @@ class SyncServer {
     res.writeHead(code, { ...SECURITY_HEADERS, 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ ok: false, error: message }));
   }
+}
+
+function extName(ext) {
+  const pj = ext.packageJSON || {};
+  const n = typeof pj.displayName === 'string' && !pj.displayName.startsWith('%') ? pj.displayName : pj.name;
+  return n || ext.id;
 }
 
 function offsetIn(text, p) {

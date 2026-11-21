@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<meta name="theme-color" content="#21252b">
+<meta name="theme-color" content="#181818">
 <meta name="referrer" content="no-referrer">
 <title>Mobile Sync</title>
 <link rel="icon" href="icon.svg">
@@ -11,33 +11,116 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header>
-  <button id="menu" type="button" aria-label="ไฟล์">☰</button>
+<header id="titlebar">
+  <button id="menu" type="button" aria-label="แถบข้าง" title="แถบข้าง (Ctrl+B)">
+    <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
   <div class="titlebox"><span id="title">Mobile Sync</span><span id="dirty" hidden title="ยังไม่ได้บันทึก">●</span></div>
-  <button id="problems" type="button" hidden title="ปัญหาที่ extension บนคอมตรวจเจอ"></button>
+  <button id="problems" type="button" hidden title="ปัญหาในไฟล์นี้"></button>
   <span id="status" data-state="connecting"></span>
-  <button id="cmd" type="button" aria-label="รันคำสั่งบนคอม" title="รันคำสั่งของ extension บนคอม">⚡</button>
+  <button id="cmd" type="button" aria-label="รันคำสั่งบนคอม" title="รันคำสั่งของส่วนขยายบนคอม">⚡</button>
   <button id="save" type="button" disabled>บันทึก</button>
 </header>
-<nav id="tabs" hidden></nav>
-<main id="editor"></main>
-<div id="keybar"></div>
 
-<div id="scrim" hidden></div>
-<aside id="drawer">
-  <h3>เปิดอยู่บนคอม</h3>
-  <div id="pcTabs"></div>
-  <h3>ค้นหาไฟล์ในโปรเจกต์ <button id="reload" type="button" title="โหลดใหม่">⟳</button></h3>
-  <input id="search" type="search" placeholder="พิมพ์ชื่อไฟล์…" autocomplete="off" autocapitalize="off" spellcheck="false">
-  <div id="results"></div>
-  <h3>ตั้งค่า</h3>
-  <label class="row"><input id="follow" type="checkbox"> เปิดไฟล์ตามคอมอัตโนมัติ</label>
-  <label class="row"><input id="wrap" type="checkbox"> ตัดบรรทัดยาว</label>
-  <div class="row">ขนาดตัวอักษร
-    <button id="fsDown" type="button">A−</button><span id="fsLabel"></span><button id="fsUp" type="button">A+</button>
+<div id="workbench">
+  <div id="scrim" hidden></div>
+  <div id="side">
+    <nav id="activity">
+      <button type="button" data-view="explorer" title="Explorer" aria-label="Explorer">
+        <svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 3H5"/></svg>
+      </button>
+      <button type="button" data-view="search" title="Search" aria-label="Search">
+        <svg viewBox="0 0 24 24"><circle cx="14" cy="10" r="6"/><path d="M9.8 14.2 4 20"/></svg>
+      </button>
+      <button type="button" data-view="extensions" title="Extensions" aria-label="Extensions">
+        <svg viewBox="0 0 24 24"><rect x="3" y="10" width="5" height="5"/><rect x="8" y="10" width="5" height="5"/><rect x="3" y="15" width="5" height="5"/><rect x="8" y="15" width="5" height="5"/><rect x="14.5" y="3.5" width="5" height="5" transform="rotate(15 17 6)"/></svg>
+      </button>
+      <button type="button" data-view="problems" title="Problems" aria-label="Problems">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg>
+        <span id="actProblems" class="badge" hidden></span>
+      </button>
+      <div class="spacer"></div>
+      <button type="button" data-view="settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>
+      </button>
+    </nav>
+
+    <aside id="sidebar">
+      <section class="view" data-view="explorer" hidden>
+        <div class="viewTitle"><span>EXPLORER</span>
+          <span class="actions"><button id="reload" type="button" title="รีเฟรช">⟳</button><button id="collapseAll" type="button" title="ยุบโฟลเดอร์ทั้งหมด">⊟</button></span>
+        </div>
+        <div class="pane">
+          <button class="paneHead" type="button"><span class="chev">▾</span> OPEN EDITORS <span class="hint">(บนคอม)</span></button>
+          <div id="pcTabs" class="paneBody"></div>
+        </div>
+        <div class="pane grow">
+          <button class="paneHead" type="button"><span class="chev">▾</span> <span id="wsName">โปรเจกต์</span></button>
+          <div id="tree" class="paneBody"></div>
+        </div>
+      </section>
+
+      <section class="view" data-view="search" hidden>
+        <div class="viewTitle"><span>SEARCH</span></div>
+        <div class="seg"><button id="modeText" type="button" class="on">ข้อความในไฟล์</button><button id="modeName" type="button">ชื่อไฟล์</button></div>
+        <div class="searchBox">
+          <input id="search" type="search" placeholder="ค้นหาข้อความในทุกไฟล์…" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search">
+          <span id="searchOpts">
+            <button id="optCase" type="button" title="ตรงตัวพิมพ์เล็ก/ใหญ่">Aa</button>
+            <button id="optWord" type="button" title="ทั้งคำ"><u>ab</u></button>
+            <button id="optRegex" type="button" title="Regular expression">.*</button>
+          </span>
+        </div>
+        <div id="searchInfo" class="muted small"></div>
+        <div id="results"></div>
+      </section>
+
+      <section class="view" data-view="extensions" hidden>
+        <div class="viewTitle"><span>EXTENSIONS <span class="hint">ที่ติดตั้งบนคอม</span></span>
+          <span class="actions"><button id="extReload" type="button" title="รีเฟรช">⟳</button></span>
+        </div>
+        <div class="searchBox"><input id="extSearch" type="search" placeholder="ค้นหาส่วนขยาย…" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+        <label class="row small"><input id="extBuiltin" type="checkbox"> แสดงส่วนขยายในตัว <span class="count" id="extCount"></span></label>
+        <div id="extList"></div>
+      </section>
+
+      <section class="view" data-view="problems" hidden>
+        <div class="viewTitle"><span>PROBLEMS</span>
+          <span class="actions"><button id="probReload" type="button" title="รีเฟรช">⟳</button></span>
+        </div>
+        <div id="probList"></div>
+      </section>
+
+      <section class="view" data-view="settings" hidden>
+        <div class="viewTitle"><span>SETTINGS</span></div>
+        <label class="row"><input id="follow" type="checkbox"> เปิดไฟล์ตามคอมอัตโนมัติ</label>
+        <label class="row"><input id="wrap" type="checkbox"> ตัดบรรทัดยาว</label>
+        <div class="row">ขนาดตัวอักษร
+          <button id="fsDown" type="button">A−</button><span id="fsLabel"></span><button id="fsUp" type="button">A+</button>
+        </div>
+        <button id="forget" type="button" class="danger">ลืมรหัสบนมือถือเครื่องนี้</button>
+      </section>
+    </aside>
   </div>
-  <button id="forget" type="button" class="danger">ลืมรหัสบนมือถือเครื่องนี้</button>
-</aside>
+
+  <section id="editorArea">
+    <nav id="tabs" hidden></nav>
+    <main id="editor"></main>
+    <div id="welcome">
+      <svg viewBox="0 0 64 64"><rect x="19" y="8" width="26" height="48" rx="5"/><path d="M28 26l-5 6 5 6M36 26l5 6-5 6"/></svg>
+      <p>แตะ <b>☰</b> แล้วเลือกไฟล์จาก Explorer</p>
+    </div>
+  </section>
+</div>
+
+<div id="keybar"></div>
+<footer id="statusbar">
+  <button id="sbConn" type="button" data-state="connecting">● กำลังเชื่อมต่อ…</button>
+  <button id="sbProblems" type="button" title="Problems">✖ 0  ⚠ 0</button>
+  <span class="spacer"></span>
+  <span id="sbPos"></span>
+  <span id="sbLang"></span>
+</footer>
 
 <div id="cmdSheet" hidden>
   <div class="sheetHead">
