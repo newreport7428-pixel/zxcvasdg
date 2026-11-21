@@ -114,7 +114,14 @@ await pcInsert(winDoc, 0, 0, '// edited on PC\r\n');
 check('PC edit appears on phone', await until(async () => (await phoneText()).startsWith('// edited on PC\nfunction hello()')));
 
 // --- extra key bar
-await page.locator('#keybar button', { hasText: '{' }).first().dispatchEvent('pointerdown');
+const keyTap = async (label) => {
+  const k = page.locator('#keybar button', { hasText: label }).first();
+  const box = await k.boundingBox();
+  const at = { clientX: box.x + box.width / 2, clientY: box.y + box.height / 2, pointerId: 7, isPrimary: true, pointerType: 'touch', bubbles: true };
+  await k.dispatchEvent('pointerdown', at);
+  await k.dispatchEvent('pointerup', at);
+};
+await keyTap('{');
 check('key bar inserts symbol', await until(() => winDoc.getText().includes('x++;{')), JSON.stringify(winDoc.getText()));
 
 // --- save from phone
@@ -159,6 +166,37 @@ await page.click('.cm-line:has-text("print(x)")');
 await page.keyboard.press('End');
 await page.keyboard.type(' -- hi');
 check('edit second file (lua)', await until(() => luaDoc.getText() === 'local x = 1\nprint(x) -- hi\n'), JSON.stringify(luaDoc.getText()));
+
+// --- swiping the key bar to scroll must not press the key under the finger
+{
+  const before = luaDoc.getText();
+  const k = page.locator('#keybar button', { hasText: '[' }).first();
+  const box = await k.boundingBox();
+  const p0 = { clientX: box.x + box.width / 2, clientY: box.y + box.height / 2, pointerId: 9, isPrimary: true, pointerType: 'touch', bubbles: true };
+  await k.dispatchEvent('pointerdown', p0);
+  await k.dispatchEvent('pointermove', { ...p0, clientX: p0.clientX - 60 });
+  await k.dispatchEvent('pointerup', { ...p0, clientX: p0.clientX - 60 });
+  await k.dispatchEvent('pointerdown', p0);
+  await k.dispatchEvent('pointercancel', p0); // what the browser sends when it starts scrolling
+  await wait(300);
+  check('swiping the key bar does not type', luaDoc.getText() === before && !(await phoneText()).includes('['), JSON.stringify(luaDoc.getText()));
+}
+
+// --- undo back to the saved text shows the file as saved again
+await page.click('#save');
+await until(async () => !(await page.isVisible('#dirty')));
+await page.click('.cm-line:has-text("print(x)")');
+await page.keyboard.press('End');
+await page.keyboard.type('zz');
+check('typing marks the file unsaved', await until(() => page.isVisible('#dirty')));
+await until(() => luaDoc.getText().includes('zz'));
+await keyTap('↶');
+check('undo back to saved text: phone shows saved', await until(async () => !(await page.isVisible('#dirty')) && !luaDoc.getText().includes('zz')), JSON.stringify(luaDoc.getText()));
+check('undo back to saved text: tab not marked', await until(async () => !(await page.$eval('#tabs .tab.on', (e) => e.classList.contains('dirty')))));
+await page.keyboard.type('q');
+check('editing again marks it unsaved', await until(() => page.isVisible('#dirty')));
+await page.keyboard.press('Backspace');
+check('deleting back to saved text shows saved again', await until(async () => !(await page.isVisible('#dirty'))));
 
 // --- installed extensions keep working
 uploads.length = 0;

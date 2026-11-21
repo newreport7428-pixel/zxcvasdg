@@ -42,7 +42,9 @@ const BUILTIN_COMMANDS = [
   ['editor.action.transformToUppercase', 'Transform to Uppercase'],
   ['editor.action.transformToLowercase', 'Transform to Lowercase'],
 ];
-const HISTORY = 500; // change sets kept per file to rebase late phone edits
+const HISTORY = 500;
+const MAX_DIRTY_COMPARE = 4 * 1024 * 1024;
+const hashOf = (s) => crypto.createHash('sha1').update(s).digest('base64'); // change sets kept per file to rebase late phone edits
 const FILE_EXCLUDE = '**/{node_modules,.git,dist,out,build,.next,.nuxt,.venv,venv,__pycache__,target,.gradle,Pods}/**';
 
 const normalize = (s) => s.replace(/\r\n?/g, '\n');
@@ -125,7 +127,7 @@ class SyncServer {
         const w = this.watched.get(uri);
         if (!w) return;
         if (!e.contentChanges.length) {
-          this.broadcast({ type: 'dirty', uri, dirty: e.document.isDirty, version: e.document.version });
+          this.broadcast({ type: 'dirty', uri, dirty: this.dirtyOf(e.document), version: e.document.version });
           return;
         }
         // contentChanges are relative to the document before this edit, like a CodeMirror ChangeSet.
@@ -152,7 +154,7 @@ class SyncServer {
           type: 'change',
           uri,
           version: w.version,
-          dirty: e.document.isDirty,
+          dirty: this.dirtyOf(e.document),
           origin: this.pendingOrigin.get(uri) || 'pc',
           changes: changes.toJSON(),
           len: w.shadow.length,
@@ -160,7 +162,11 @@ class SyncServer {
       }),
       vs.workspace.onDidSaveTextDocument((doc) => {
         const uri = doc.uri.toString();
-        if (this.watched.has(uri)) this.broadcast({ type: 'dirty', uri, dirty: doc.isDirty, version: doc.version });
+        const w = this.watched.get(uri);
+        if (w) {
+          this.markSaved(w);
+          this.broadcast({ type: 'dirty', uri, dirty: this.dirtyOf(doc), version: doc.version });
+        }
       }),
       vs.workspace.onDidCloseTextDocument((doc) => {
         const uri = doc.uri.toString();
@@ -347,16 +353,41 @@ class SyncServer {
       version: w.version,
       text: w.shadow.toString(),
       languageId: doc.languageId,
-      dirty: doc.isDirty,
+      dirty: this.dirtyOf(doc),
       path: doc.uri.scheme === 'file' ? vs.workspace.asRelativePath(doc.uri) : doc.uri.path,
       diags: this.diagnostics(doc.uri),
     };
   }
 
   track(doc) {
-    const w = { version: doc.version, shadow: toText(doc.getText()), history: [] };
+    const w = { version: doc.version, shadow: toText(doc.getText()), history: [], saved: null };
+    if (!doc.isDirty) this.markSaved(w);
+    else if (doc.uri.scheme === 'file') {
+      // Opened while already unsaved: compare against the file on disk.
+      try {
+        const disk = normalize(fs.readFileSync(doc.uri.fsPath, 'utf8'));
+        w.saved = { len: disk.length, hash: hashOf(disk) };
+      } catch {}
+    }
     this.watched.set(doc.uri.toString(), w);
     return w;
+  }
+
+  markSaved(w) {
+    if (!w) return;
+    const text = w.shadow.toString();
+    w.saved = { len: text.length, hash: hashOf(text) };
+  }
+
+  // VS Code keeps a file "unsaved" after any edit until it is saved (only its own Undo clears
+  // that). Edits from the phone are normal edits, so undoing on the phone back to the saved text
+  // would still look unsaved. Report unsaved only when the text really differs from the saved one.
+  dirtyOf(doc) {
+    if (!doc.isDirty) return false;
+    const w = this.watched.get(doc.uri.toString());
+    if (!w || !w.saved || w.shadow.length > MAX_DIRTY_COMPARE) return true;
+    if (w.shadow.length !== w.saved.len) return true;
+    return hashOf(w.shadow.toString()) !== w.saved.hash;
   }
 
   // A phone sends a ChangeSet made against `version`. If the computer changed the file since,
@@ -381,7 +412,7 @@ class SyncServer {
     } catch {
       return conflict();
     }
-    if (cs.empty) return { ok: true };
+    if (cs.empty) return { ok: true, noop: true, dirty: this.dirtyOf(doc) }; // nothing to apply, no echo will come
 
     const eol = doc.eol === vs.EndOfLine.CRLF ? '\r\n' : '\n';
     const we = new vs.WorkspaceEdit();
@@ -409,7 +440,8 @@ class SyncServer {
     let ok;
     if (typeof this.vscode.workspace.save === 'function') ok = !!(await this.vscode.workspace.save(doc.uri));
     else ok = await doc.save();
-    return { ok, version: doc.version, dirty: doc.isDirty };
+    if (ok) this.markSaved(this.watched.get(uri));
+    return { ok, version: doc.version, dirty: this.dirtyOf(doc) };
   }
 
   // Problems reported by language extensions (ESLint, Pylance, TypeScript, ...).

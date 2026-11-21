@@ -150,7 +150,7 @@ const workspace = {
     doc.text = t;
     doc.version++;
     const wasDirty = doc.isDirty;
-    doc.isDirty = doc.text !== doc.saved;
+    doc.isDirty = true; // like VS Code: edits keep it dirty until saved
     onChange.fire({ document: doc, contentChanges: items.map((e) => ({ range: e.range, text: e.text })) });
     if (wasDirty !== doc.isDirty) refreshTabs();
     return true;

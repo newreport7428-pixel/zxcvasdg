@@ -245,6 +245,17 @@ async function flush(d) {
     toast('การเชื่อมต่อหลุด กำลังโหลดไฟล์ใหม่จากคอม');
     return resync(d);
   }
+  if (res.ok && res.noop) {
+    // e.g. typed and deleted before it was sent: nothing changed, so no confirmation will follow
+    if (d.inflight === sent) {
+      d.inflight = null;
+      clearTimeout(d.ackTimer);
+      if (!d.pending) d.dirty = res.dirty;
+      renderHeader();
+      flush(d);
+    }
+    return;
+  }
   if (res.ok) return;
   if (res.error === 'gone') return markClosed(d);
   toast('ซิงค์ไม่ทัน — โหลดเวอร์ชันล่าสุดจากคอมแล้ว');
@@ -1412,18 +1423,36 @@ function moveBy(v, n) {
 }
 function buildKeybar() {
   const bar = $('#keybar');
+  let tap = null; // the key being pressed, until we know it is a tap and not a swipe
+  const cancel = () => {
+    if (tap) tap.btn.classList.remove('down');
+    tap = null;
+  };
   for (const [label, run] of KEYS) {
     const b = el('button', { textContent: label, type: 'button' });
+    // preventDefault keeps the phone keyboard open (the editor keeps focus).
     b.addEventListener('pointerdown', (e) => {
       e.preventDefault();
+      tap = { btn: b, id: e.pointerId, x: e.clientX, y: e.clientY, scroll: bar.scrollLeft };
+      b.classList.add('down');
+    });
+    b.addEventListener('pointermove', (e) => {
+      if (tap && tap.id === e.pointerId && (Math.abs(e.clientX - tap.x) > 8 || Math.abs(e.clientY - tap.y) > 8)) cancel();
+    });
+    b.addEventListener('pointercancel', cancel); // the browser took over to scroll the bar
+    bar.append(b);
+    b.addEventListener('pointerup', (e) => {
+      const t = tap;
+      cancel();
+      if (!t || t.btn !== b || t.id !== e.pointerId) return;
+      if (Math.abs(e.clientX - t.x) > 8 || Math.abs(bar.scrollLeft - t.scroll) > 2) return; // it was a swipe
       if (!current) return;
       run(view);
       view.focus();
     });
-    bar.append(b);
   }
+  bar.addEventListener('scroll', cancel, { passive: true });
 }
-
 function showLogin(reason) {
   setStatus('offline');
   $('#login').hidden = false;
