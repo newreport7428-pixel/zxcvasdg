@@ -71,12 +71,18 @@ func (w *webrootCerts) load() bool {
 	}
 	c.Leaf = leaf
 	w.cur.Store(&c)
-	return time.Until(leaf.NotAfter) > 30*24*time.Hour
+	return !w.needsRenewal()
 }
 
+// needsRenewal: renew once a third of the certificate's lifetime is left (works for 90-day,
+// 45-day and short-lived certificates alike).
 func (w *webrootCerts) needsRenewal() bool {
 	c, _ := w.cur.Load().(*tls.Certificate)
-	return c == nil || c.Leaf == nil || time.Until(c.Leaf.NotAfter) < 30*24*time.Hour
+	if c == nil || c.Leaf == nil {
+		return true
+	}
+	life := c.Leaf.NotAfter.Sub(c.Leaf.NotBefore)
+	return time.Until(c.Leaf.NotAfter) < life/3
 }
 
 func loadOrCreateKey(path string) (*ecdsa.PrivateKey, error) {
@@ -179,7 +185,7 @@ func (w *webrootCerts) obtain(ctx context.Context) error {
 	if err := os.WriteFile(w.certPath(), certPEM, 0o600); err != nil {
 		return err
 	}
-	if !w.load() && w.needsRenewal() {
+	if w.load(); w.needsRenewal() {
 		return errors.New("new certificate could not be loaded")
 	}
 	log.Printf("got a Let's Encrypt certificate for %s", w.host)

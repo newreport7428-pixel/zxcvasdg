@@ -58,7 +58,8 @@ type Config struct {
 	Host     string `json:"host"`              // domain name (Let's Encrypt) or public IP (self-signed)
 	AgentKey string `json:"agentKey"`          // shared with the extension, never sent over the wire
 	Listen   string `json:"listen,omitempty"`  // HTTPS address, default :443
-	Webroot  string `json:"webroot,omitempty"` // IIS site folder when IIS owns port 80
+	Webroot  string `json:"webroot,omitempty"` // folder served by IIS on port 80 for the certificate check
+	IISSite  string `json:"iisSite,omitempty"` // IIS website created by the relay (removed on uninstall)
 }
 
 // ---------------------------------------------------------------- messages
@@ -456,13 +457,17 @@ func loadOrCreateConfig(path string) (Config, error) {
 	if cfg.Host == "" || strings.ContainsAny(cfg.Host, " /:") {
 		return cfg, errors.New("no valid domain or IP entered")
 	}
-	if net.ParseIP(cfg.Host) == nil && (webrootPortsBusy()) {
-		wr, err := askWebroot(in, cfg.Host)
-		if err != nil {
+	if net.ParseIP(cfg.Host) == nil && webrootPortsBusy() {
+		if err := setupBehindIIS(in, &cfg, filepath.Dir(path)); err != nil {
 			return cfg, err
 		}
-		cfg.Webroot = wr
 		cfg.Listen = ":8443"
+		for p := 8443; p < 8500 && portBusy(fmt.Sprintf(":%d", p)); p++ {
+			cfg.Listen = fmt.Sprintf(":%d", p+1)
+		}
+		if cfg.Listen != ":8443" {
+			fmt.Printf("\nPort 8443 is used by another program, so the relay will use port %s instead.\n", strings.TrimPrefix(cfg.Listen, ":"))
+		}
 	}
 	cfg.AgentKey = randString(32)
 	b, _ := json.MarshalIndent(cfg, "", "  ")
@@ -487,7 +492,18 @@ func main() {
 	selfCheckAddr := flag.String("selfcheck-addr", "", "TESTING ONLY: address used for the webroot self-check")
 	setupOnly := flag.Bool("setup", false, "ask the setup questions, get the certificate, write connect-string.txt, then exit")
 	printPorts := flag.Bool("print-ports", false, "print the TCP ports to open in the firewall, then exit")
+	removeSite := flag.Bool("remove-iis-site", false, "remove the IIS website the setup created, then exit")
 	flag.Parse()
+	if *removeSite {
+		var cfg Config
+		if b, err := os.ReadFile(*cfgPath); err == nil && json.Unmarshal(b, &cfg) == nil && cfg.IISSite != "" {
+			if err := removeIISSite(cfg.Host); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+		}
+		return
+	}
 
 	logFile, err := os.OpenFile(filepath.Join(base, "relay.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err == nil {
