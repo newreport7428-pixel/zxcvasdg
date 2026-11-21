@@ -490,6 +490,8 @@ func main() {
 	acmeDir := flag.String("acme-directory", autocert.DefaultACMEDirectory, "ACME directory URL")
 	acmeCA := flag.String("acme-ca", "", "TESTING ONLY: extra CA file to trust for the ACME server")
 	selfCheckAddr := flag.String("selfcheck-addr", "", "TESTING ONLY: address used for the webroot self-check")
+	setupOnly := flag.Bool("setup", false, "ask the setup questions, get the certificate, write connect-string.txt, then exit")
+	printPorts := flag.Bool("print-ports", false, "print the TCP ports to open in the firewall, then exit")
 	flag.Parse()
 
 	logFile, err := os.OpenFile(filepath.Join(base, "relay.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -511,6 +513,19 @@ func main() {
 	}
 	if cfg.Webroot != "" {
 		*httpListen = "" // IIS owns port 80
+	}
+	if *printPorts {
+		ports := []string{}
+		for _, a := range []string{*listen, *httpListen} {
+			if _, p, err := net.SplitHostPort(a); err == nil && p != "" {
+				ports = append(ports, p)
+			}
+		}
+		fmt.Println(strings.Join(ports, ","))
+		return
+	}
+	if *setupOnly {
+		*httpListen = "" // do not start listeners while only setting up
 	}
 	roots, err := x509.SystemCertPool()
 	if err != nil || roots == nil {
@@ -600,6 +615,12 @@ func main() {
 	}
 
 	os.WriteFile(filepath.Join(base, "connect-string.txt"), []byte(connect+"\r\n"), 0o600)
+	if *setupOnly {
+		fmt.Println()
+		fmt.Println("Setup finished. Connect string saved in connect-string.txt:")
+		fmt.Println(" ", connect)
+		return
+	}
 	fmt.Println()
 	fmt.Println("================================================================")
 	fmt.Println(" Mobile Sync relay is running on", *listen)
