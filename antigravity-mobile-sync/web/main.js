@@ -177,7 +177,7 @@ let pcActive = null;
 let fileList = null;
 
 const view = new EditorView({ parent: $('#editor') });
-window.__mobileSync = { view }; // handy for debugging from the browser console
+window.__mobileSync = { view, docs, resync: (uri) => resync(docs.get(uri)) }; // for debugging/tests
 
 function extensionsFor(d) {
   return [
@@ -237,9 +237,20 @@ async function flush(d) {
   resync(d);
 }
 
+// Changes that arrive while a file is being (re)loaded are held and replayed afterwards.
+const opening = new Map(); // uri -> events received while /api/open is in flight
+
 function onRemoteChange(ev) {
   const d = docs.get(ev.uri);
-  if (!d || d.closed || d.syncing) return;
+  if (!d) {
+    if (opening.has(ev.uri)) opening.get(ev.uri).push(ev);
+    return;
+  }
+  if (d.closed) return;
+  if (d.syncing) {
+    d.held.push(ev);
+    return;
+  }
   if (ev.version <= d.version) return;
   if (ev.version !== d.version + 1) return resync(d); // missed something
 
@@ -288,11 +299,15 @@ async function resync(d) {
     data = await api('/api/open', { uri: d.uri });
   } catch (err) {
     d.syncing = false;
+    d.held = [];
     if (err instanceof AuthError) return showLogin(err.message);
     return; // offline; the reconnect handler resyncs again
   }
   d.syncing = false;
-  if (!data.ok) return markClosed(d);
+  if (!data.ok) {
+    d.held = [];
+    return markClosed(d);
+  }
   d.inflight = null;
   d.pending = null;
   const old = docText(d).toString();
@@ -311,6 +326,13 @@ async function resync(d) {
   d.version = data.version;
   d.dirty = data.dirty;
   renderHeader();
+  replay(d);
+}
+
+function replay(d, events) {
+  const list = (events || d.held).sort((a, b) => a.version - b.version);
+  d.held = [];
+  for (const ev of list) onRemoteChange(ev);
 }
 
 function markClosed(d) {
@@ -322,13 +344,18 @@ function markClosed(d) {
 // ---------------------------------------------------------------- documents
 async function openDoc(uri, { quiet = false } = {}) {
   if (docs.has(uri)) return showDoc(uri);
+  if (opening.has(uri)) return;
+  opening.set(uri, []);
   let data;
   try {
     data = await api('/api/open', { uri });
   } catch (err) {
+    opening.delete(uri);
     if (err instanceof AuthError) return showLogin(err.message);
     return toast('เปิดไฟล์ไม่ได้ — ไม่ได้เชื่อมต่อกับคอม');
   }
+  const early = opening.get(uri) || [];
+  opening.delete(uri);
   if (!data.ok) return quiet || toast(data.error || 'เปิดไฟล์ไม่ได้');
   const d = {
     uri,
@@ -338,12 +365,14 @@ async function openDoc(uri, { quiet = false } = {}) {
     dirty: data.dirty,
     pending: null, // ChangeSet typed but not sent yet
     inflight: null, // ChangeSet sent, waiting for confirmation
+    held: [], // computer changes received while reloading
     closed: false,
   };
   d.state = EditorState.create({ doc: data.text, extensions: extensionsFor(d) });
   docs.set(uri, d);
   applyDiags(d, data.diags || []);
   showDoc(uri);
+  replay(d, early);
 }
 
 function showDoc(uri) {

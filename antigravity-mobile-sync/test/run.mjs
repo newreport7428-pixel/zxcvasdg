@@ -205,6 +205,26 @@ check('reconnects automatically', await until(() => page.$eval('#status', (e) =>
 await pcInsert(luaDoc, 0, 0, '-- after reconnect\n');
 check('sync works after reconnect', await until(async () => (await phoneText()).startsWith('-- after reconnect')), JSON.stringify(await phoneText()));
 
+// --- computer edits that land while the phone is reloading a file are not lost
+await page.route('**/api/open', async (route) => {
+  const resp = await route.fetch(); // the computer has answered...
+  await wait(500); // ...but the answer reaches the phone late
+  await route.fulfill({ response: resp });
+});
+const luaUri = luaDoc.uri.toString();
+page.evaluate((u) => window.__mobileSync.resync(u), luaUri);
+await wait(150);
+await pcInsert(luaDoc, 0, 0, '-- typed during reload\n');
+check('PC edit during phone reload is kept', await until(async () => (await phoneText()).startsWith('-- typed during reload\n-- after reconnect')), JSON.stringify(await phoneText()));
+
+const lateDoc = addDoc('/proj/late.txt', 'first line\n', 'plaintext');
+await page.click('#menu');
+await page.click('#pcTabs .file:has-text("late.txt")');
+await wait(150);
+await pcInsert(lateDoc, 0, 0, 'typed while opening\n');
+check('PC edit while phone opens a file is kept', await until(async () => (await phoneText()) === 'typed while opening\nfirst line\n'), JSON.stringify(await phoneText()));
+await page.unroute('**/api/open');
+
 // --- wrong key in the page shows the login screen
 const page2 = await ctx.newPage();
 await page2.goto(`${base}/#t=wrong`);
