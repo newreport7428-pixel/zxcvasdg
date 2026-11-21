@@ -46,11 +46,71 @@
 3. สแกน QR อันนั้น ใช้ได้ทุกที่ที่มีเน็ต และข้อมูลถูกเข้ารหัส
 4. (ไม่บังคับ) ถ้าอยากให้เข้าได้ **เฉพาะ** ผ่าน Tailscale: Settings → ค้นหา `mobileSync.host` → ใส่ IP Tailscale ของคอม (ขึ้นต้นด้วย `100.`)
 
+## ใช้นอกบ้านผ่าน VPS ของคุณเอง
+มือถือเปิดลิงก์ `https://` ของ VPS ได้จากทุกที่ ไม่ต้องลงแอปเพิ่มบนมือถือ
+คอมจะเป็นฝ่าย**ต่อออกไปหา VPS เอง** จึงไม่ต้องเปิดพอร์ตที่เราเตอร์บ้าน
+
+```
+มือถือ ──HTTPS──▶ VPS (mobile-sync-relay) ◀──WSS── Antigravity บนคอม
+```
+
+ไฟล์ที่ใช้อยู่ใน `relay/bin/`:
+- `mobile-sync-relay.exe` สำหรับ Windows Server 2012, 2012 R2 และรุ่นใหม่กว่า
+- `mobile-sync-relay-linux` สำหรับ VPS ที่เป็น Linux
+
+### 1. ทำชื่อโดเมนฟรี (แนะนำมาก)
+ถ้ามีโดเมน มือถือจะได้ HTTPS แท้ (Let's Encrypt) ไม่ขึ้นคำเตือน
+1. เข้า duckdns.org แล้วล็อกอิน
+2. ตั้งชื่อ เช่น `mycode` แล้วใส่ IP ของ VPS ในช่อง current ip และกด update ip
+3. จะได้โดเมน `mycode.duckdns.org`
+
+ถ้ามีโดเมนของตัวเองอยู่แล้ว ให้ตั้ง A record ชี้ไปที่ IP ของ VPS แทนก็ได้
+
+ถ้าไม่มีโดเมน ใช้ IP ตรงๆ ก็ได้ แต่มือถือจะขึ้นคำเตือนใบรับรองทุกครั้ง และต้องกด "ดำเนินการต่อ"
+
+### 2. ติดตั้งบน VPS (Windows Server)
+1. คัดลอก `mobile-sync-relay.exe` ไปไว้ใน VPS เช่นที่ `C:\mobile-sync\`
+2. เปิด **Command Prompt แบบ Administrator** แล้วเปิดไฟร์วอลล์:
+   ```
+   netsh advfirewall firewall add rule name="Mobile Sync Relay" dir=in action=allow protocol=TCP localport=80,443
+   ```
+   ถ้าผู้ให้บริการ VPS มีไฟร์วอลล์ในหน้าเว็บด้วย ให้เปิดพอร์ต 80 และ 443 ที่นั่นด้วย
+3. ดับเบิลคลิก `mobile-sync-relay.exe` แล้วพิมพ์โดเมน (เช่น `mycode.duckdns.org`) หรือ IP ของ VPS ตามด้วย Enter
+4. จะมีข้อความขึ้นต้นด้วย `https://...#key=...` ขึ้นมา และถูกบันทึกไว้ในไฟล์ `connect-string.txt` ด้วย **ข้อความนี้คือรหัสลับ ห้ามให้ใคร**
+5. ให้รันเองทุกครั้งที่ VPS รีสตาร์ต (ทำหลังจากข้อ 3 แล้วเท่านั้น):
+   ```
+   schtasks /create /tn "MobileSyncRelay" /tr "C:\mobile-sync\mobile-sync-relay.exe" /sc onstart /ru SYSTEM /f
+   ```
+
+ถ้า VPS ใช้พอร์ต 443 อยู่แล้ว (เช่นมี IIS) ให้รันด้วย `mobile-sync-relay.exe -listen :8443`
+ในกรณีนี้พอร์ต 80 ต้องเปิดไว้ เพราะใช้ขอใบรับรอง
+
+ถ้าเป็น Linux: รัน `./mobile-sync-relay-linux` ด้วยสิทธิ์ root หรือเปิดสิทธิ์ใช้พอร์ต 443 ให้มัน
+
+### 3. ตั้งค่าบนคอม
+1. ใน Antigravity กด `Ctrl+Shift+P` → **Mobile Sync: Connect to VPS Relay**
+2. วางข้อความ `https://...#key=...` จากข้อ 2.4
+3. สั่ง **Mobile Sync: Start** แถบล่างจะขึ้น `VPS ✓` เมื่อต่อติด
+4. สแกน QR ที่เขียนว่า **"ผ่าน VPS (ใช้ได้ทุกที่)"**
+
+**แนะนำ:** ถ้าใช้ผ่าน VPS อย่างเดียว ให้ไปที่ Settings → `mobileSync.host` แล้วใส่ `127.0.0.1`
+คอมจะไม่เปิดรับการเชื่อมต่อจาก Wi-Fi เลย ทุกอย่างต้องผ่าน VPS
+
+### ความปลอดภัยของโหมด VPS
+- ระหว่างมือถือกับ VPS เข้ารหัสด้วย HTTPS และระหว่าง VPS กับคอมเข้ารหัสด้วย WSS
+- key ของคอมไม่ถูกส่งผ่านเน็ตเลย คอมยืนยันตัวด้วยการตอบคำถามที่คำนวณจาก key (HMAC)
+- ในโหมด IP คอมจะตรวจลายนิ้วมือใบรับรองของ VPS ก่อนเสมอ ถ้าไม่ตรงจะไม่ยอมต่อ
+- รหัสในลิงก์ของมือถือยังถูกตรวจที่**คอม** แม้มีคนเข้าถึง VPS ได้ก็ใช้รหัสนั้นแทนไม่ได้
+- ⚠ แต่ **VPS เห็นโค้ดที่วิ่งผ่าน** เพราะเป็นจุดที่ถอดรหัส HTTPS ถ้า VPS ถูกเจาะ คนเจาะจะอ่านโค้ดได้
+- ⚠ **Windows Server 2012 หมดระยะการอัปเดตความปลอดภัยแล้ว** (ตั้งแต่ ต.ค. 2023) ควรตั้งรหัสผ่าน RDP ให้แข็งแรง และไม่ลงโปรแกรมอื่นที่ไม่จำเป็น
+  ถ้าย้ายไปใช้ Windows Server รุ่นใหม่หรือ Linux ได้จะปลอดภัยกว่า
+- ถ้าสงสัยว่า key หลุด: บน VPS ลบไฟล์ `relay-config.json` แล้วรันใหม่ จะได้ key ใหม่ จากนั้นสั่ง Connect to VPS Relay บนคอมอีกครั้ง
+
 ## ตั้งค่า (Settings → ค้นหา "Mobile Sync")
 | ค่า | ค่าเริ่มต้น | ความหมาย |
 |---|---|---|
 | `mobileSync.port` | `8765` | พอร์ตที่มือถือเชื่อมต่อ |
-| `mobileSync.host` | `0.0.0.0` | ฟังทุกเครือข่าย ใส่ IP Tailscale ถ้าอยากจำกัดให้ใช้ผ่าน Tailscale อย่างเดียว |
+| `mobileSync.host` | `0.0.0.0` | ฟังทุกเครือข่าย, `127.0.0.1` = ผ่าน VPS อย่างเดียว, หรือใส่ IP Tailscale ถ้าอยากใช้ผ่าน Tailscale อย่างเดียว |
 | `mobileSync.autoStart` | ปิด | เปิดเองทุกครั้งที่เปิด Antigravity |
 | `mobileSync.notifyOnConnect` | เปิด | แจ้งเตือนเมื่อมีมือถือเชื่อมต่อ |
 
@@ -58,14 +118,17 @@
 - ต้องเปิดคอมและ Antigravity ไว้ ห้ามให้คอม sleep
 - ใช้แก้ไฟล์ข้อความ/โค้ดเท่านั้น ไฟล์ใหญ่เกิน 5 MB เปิดไม่ได้
 - ยังไม่มี terminal และยังไม่ได้แสดงเคอร์เซอร์ของอีกฝั่ง
-- ทดสอบอัตโนมัติกับตัวจำลองของ VS Code และเบราว์เซอร์ขนาด iPhone แล้ว แต่ยังไม่ได้ทดสอบกับ Antigravity ตัวจริง ถ้าเจอปัญหาแจ้งได้เลย
+- ทดสอบอัตโนมัติกับตัวจำลองของ VS Code, เบราว์เซอร์ขนาดมือถือ และตัว relay (โหมด IP บน Linux) แล้ว แต่ยังไม่ได้ทดสอบกับ Antigravity ตัวจริง, บน Windows Server 2012 จริง หรือการขอใบรับรอง Let's Encrypt จริง ถ้าเจอปัญหาแจ้งได้เลย
 
 ## สำหรับนักพัฒนา
 ```
 npm install
-npm test          # build + ทดสอบ sync แบบ end-to-end ด้วย Playwright
+npm test          # build + ทดสอบ sync และโหมด VPS แบบ end-to-end ด้วย Playwright
+npm run relay     # build relay (Go 1.20 เพื่อให้รันบน Windows Server 2012 ได้)
 npm run package   # สร้าง mobile-sync.vsix
 ```
 - `src/extension.js` — คำสั่ง, status bar, หน้า QR
 - `src/server.js` — HTTP + Server-Sent Events, ตรวจรหัส, รวมการแก้ที่ชนกัน (rebase ด้วย ChangeSet ของ CodeMirror)
+- `src/relay.js` — ฝั่งคอมที่ต่อออกไปหา VPS แล้วส่งต่อคำขอจากมือถือ
+- `relay/main.go` — ตัว relay บน VPS (HTTPS + Let's Encrypt อัตโนมัติ)
 - `web/main.js` — หน้าเว็บบนมือถือ (CodeMirror 6) → build เป็น `media/app.js`

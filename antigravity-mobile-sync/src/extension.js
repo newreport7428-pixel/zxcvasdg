@@ -6,9 +6,12 @@
 const vscode = require('vscode');
 const { SyncServer } = require('./server');
 const { qrSvg } = require('./qr');
+const { RelayClient, parseConnectString } = require('./relay');
 
 const SECRET_KEY = 'mobileSync.token';
+const RELAY_KEY = 'mobileSync.relay';
 let server = null;
+let relay = null;
 let statusItem = null;
 
 function config() {
@@ -33,7 +36,8 @@ function updateStatus() {
   if (!statusItem) return;
   if (server && server.listening) {
     const n = server.clientCount();
-    statusItem.text = `$(device-mobile) Mobile Sync: ${n ? n + ' connected' : 'on'}`;
+    const vps = relay ? { online: ' · VPS ✓', connecting: ' · VPS …', offline: ' · VPS ✗', denied: ' · VPS ✗' }[relay.status] : '';
+    statusItem.text = `$(device-mobile) Mobile Sync: ${n ? n + ' connected' : 'on'}${vps}`;
     statusItem.tooltip = 'Mobile Sync is running — click for QR code / link';
     statusItem.command = 'mobileSync.showLink';
   } else {
@@ -55,6 +59,7 @@ async function start(context) {
     port: cfg.port,
     host: cfg.host,
     token,
+    agentNonce: require('crypto').randomBytes(24).toString('base64url'),
     mediaDir: vscode.Uri.joinPath(context.extensionUri, 'media').fsPath,
     onClientsChanged: (info) => {
       updateStatus();
@@ -76,11 +81,73 @@ async function start(context) {
     updateStatus();
     return;
   }
+  await startRelay(context);
   updateStatus();
   showLink();
 }
 
+async function startRelay(context) {
+  if (relay) relay.stop();
+  relay = null;
+  const connect = await context.secrets.get(RELAY_KEY);
+  if (!connect || !server || !server.listening) return;
+  const host = server.opts.host;
+  try {
+    relay = new RelayClient({
+      connect,
+      localHost: !host || host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host,
+      localPort: server.port,
+      agentNonce: server.opts.agentNonce,
+      onStatus: (st, detail) => {
+        updateStatus();
+        if (st === 'denied') vscode.window.showErrorMessage(`Mobile Sync: ต่อ VPS ไม่ได้ — ${detail}`);
+      },
+    });
+  } catch (err) {
+    vscode.window.showErrorMessage(`Mobile Sync: ข้อมูล VPS ที่บันทึกไว้ใช้ไม่ได้: ${err.message}`);
+    return;
+  }
+  relay.start();
+}
+
+async function connectRelay(context) {
+  const value = await vscode.window.showInputBox({
+    title: 'Mobile Sync: เชื่อมต่อผ่าน VPS',
+    prompt: 'วางข้อความจากไฟล์ connect-string.txt บน VPS (ขึ้นต้นด้วย https://)',
+    placeHolder: 'https://mycode.duckdns.org#key=...',
+    password: true,
+    ignoreFocusOut: true,
+    validateInput: (v) => {
+      try {
+        parseConnectString(v);
+        return null;
+      } catch (err) {
+        return err.message;
+      }
+    },
+  });
+  if (!value) return;
+  await context.secrets.store(RELAY_KEY, value.trim());
+  if (server && server.listening) {
+    await startRelay(context);
+    updateStatus();
+    vscode.window.showInformationMessage('Mobile Sync: บันทึกแล้ว กำลังเชื่อมต่อ VPS…');
+  } else {
+    vscode.window.showInformationMessage('Mobile Sync: บันทึกแล้ว จะเชื่อมต่อ VPS เมื่อสั่ง Start');
+  }
+}
+
+async function disconnectRelay(context) {
+  await context.secrets.delete(RELAY_KEY);
+  if (relay) relay.stop();
+  relay = null;
+  updateStatus();
+  vscode.window.showInformationMessage('Mobile Sync: เลิกใช้ VPS แล้ว');
+}
+
 async function stop() {
+  if (relay) relay.stop();
+  relay = null;
   if (server) {
     await server.close();
     server = null;
@@ -95,7 +162,14 @@ function showLink() {
     vscode.window.showWarningMessage('Mobile Sync ยังไม่ได้เปิด — สั่ง "Mobile Sync: Start" ก่อน');
     return;
   }
-  const urls = server.urls();
+  const urls = server.urls().filter((u) => !/\/\/(127\.|localhost|\[::1\])/.test(u.url));
+  if (relay) {
+    urls.unshift({
+      label: relay.cfg.pin ? 'ผ่าน VPS (ใช้ได้ทุกที่ — มือถือจะเตือนเรื่องใบรับรอง ให้กดดำเนินการต่อ)' : 'ผ่าน VPS (ใช้ได้ทุกที่)',
+      url: `${relay.origin}/#t=${encodeURIComponent(server.opts.token)}`,
+      note: relay.status === 'online' ? '' : 'ตอนนี้ยังต่อ VPS ไม่ติด',
+    });
+  }
   if (!urls.length) {
     vscode.window.showWarningMessage('Mobile Sync: ไม่พบที่อยู่เครือข่าย คอมต่อ Wi-Fi อยู่หรือเปล่า?');
     return;
@@ -112,7 +186,7 @@ function showLink() {
   const items = urls
     .map(
       (u) => `<section>
-  <h2>${esc(u.label)}</h2>
+  <h2>${esc(u.label)}</h2>${u.note ? `<p class="warn">${esc(u.note)}</p>` : ''}
   <div class="qr">${qrSvg(u.url)}</div>
   <code>${esc(u.url)}</code>
 </section>`
@@ -145,6 +219,8 @@ function activate(context) {
     vscode.commands.registerCommand('mobileSync.start', () => start(context)),
     vscode.commands.registerCommand('mobileSync.stop', () => stop()),
     vscode.commands.registerCommand('mobileSync.showLink', () => showLink()),
+    vscode.commands.registerCommand('mobileSync.connectRelay', () => connectRelay(context)),
+    vscode.commands.registerCommand('mobileSync.disconnectRelay', () => disconnectRelay(context)),
     vscode.commands.registerCommand('mobileSync.resetToken', async () => {
       const wasRunning = server && server.listening;
       if (wasRunning) await stop();
@@ -152,7 +228,7 @@ function activate(context) {
       vscode.window.showInformationMessage('Mobile Sync: สร้างรหัสใหม่แล้ว ลิงก์/QR เดิมใช้ไม่ได้อีก');
       if (wasRunning) await start(context);
     }),
-    { dispose: () => server && server.close() }
+    { dispose: () => (relay && relay.stop(), server && server.close()) }
   );
 
   if (vscode.workspace.getConfiguration('mobileSync').get('autoStart', false)) {
@@ -161,6 +237,7 @@ function activate(context) {
 }
 
 function deactivate() {
+  if (relay) relay.stop();
   if (server) return server.close();
 }
 

@@ -6,7 +6,7 @@ await esbuild.build({
   platform: 'node',
   format: 'cjs',
   target: 'node18',
-  external: ['vscode'],
+  external: ['vscode', 'bufferutil', 'utf-8-validate'],
   outfile: 'dist/extension.js',
   legalComments: 'none',
 });

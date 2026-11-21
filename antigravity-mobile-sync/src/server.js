@@ -196,7 +196,15 @@ class SyncServer {
 
   async handle(req, res) {
     const url = new URL(req.url, 'http://x');
-    const address = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    let address = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    // Requests forwarded by our own relay client carry the phone's real address.
+    const viaRelay =
+      this.opts.agentNonce &&
+      (address === '127.0.0.1' || address === '::1') &&
+      typeof req.headers['x-mobile-sync-agent'] === 'string' &&
+      req.headers['x-mobile-sync-agent'].length === this.opts.agentNonce.length &&
+      crypto.timingSafeEqual(Buffer.from(req.headers['x-mobile-sync-agent']), Buffer.from(this.opts.agentNonce));
+    if (viaRelay) address = 'VPS:' + String(req.headers['x-mobile-sync-remote'] || '?').slice(0, 64);
 
     if (req.method === 'GET' && STATIC[url.pathname]) {
       const [file, type] = STATIC[url.pathname];
