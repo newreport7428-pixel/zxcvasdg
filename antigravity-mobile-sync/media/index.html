@@ -47,7 +47,7 @@
 
     <aside id="sidebar">
       <section class="view" data-view="explorer" hidden>
-        <div class="viewTitle"><span>EXPLORER</span>
+        <div class="viewTitle"><button id="projBtn" type="button" title="สลับ/เปิดโปรเจกต์"><span class="label">โปรเจกต์</span> ▾</button>
           <span class="actions"><button id="reload" type="button" title="รีเฟรช">⟳</button><button id="collapseAll" type="button" title="ยุบโฟลเดอร์ทั้งหมด">⊟</button></span>
         </div>
         <div class="pane">
@@ -116,6 +116,7 @@
 <div id="keybar"></div>
 <footer id="statusbar">
   <button id="sbConn" type="button" data-state="connecting">● กำลังเชื่อมต่อ…</button>
+  <button id="sbProject" type="button" title="สลับ/เปิดโปรเจกต์">⧉</button>
   <button id="sbProblems" type="button" title="Problems">✖ 0  ⚠ 0</button>
   <span class="spacer"></span>
   <span id="sbPos"></span>
@@ -130,6 +131,18 @@
   </div>
   <p class="muted">คำสั่งจะรันบนคอม กับไฟล์ที่เปิดอยู่บนมือถือ</p>
   <div id="cmdList"></div>
+</div>
+
+<div id="projSheet" class="sheet" hidden>
+  <div class="sheetHead"><h3>โปรเจกต์</h3><button id="projClose" type="button" aria-label="ปิด">✕</button></div>
+  <div id="projBody"></div>
+</div>
+
+<div id="browseSheet" class="sheet" hidden>
+  <div class="sheetHead"><h3>เลือกโฟลเดอร์บนคอม</h3><button id="browseHome" type="button" title="โฟลเดอร์ผู้ใช้">⌂</button><button id="browseClose" type="button" aria-label="ปิด">✕</button></div>
+  <div id="browsePath" class="muted small"></div>
+  <div id="browseList"></div>
+  <div class="sheetFoot"><button id="browseGo" type="button">✓ เลือกโฟลเดอร์นี้</button></div>
 </div>
 
 <div id="login" hidden>

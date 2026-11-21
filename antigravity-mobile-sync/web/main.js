@@ -69,24 +69,37 @@ function toast(msg, ms = 2500) {
 }
 
 // ---------------------------------------------------------------- auth
-const hashToken = new URLSearchParams(location.hash.slice(1)).get('t');
+const hashParams = new URLSearchParams(location.hash.slice(1));
+const hashToken = hashParams.get('t');
 if (hashToken) {
   store.set('token', hashToken);
+  if (hashParams.get('w')) store.set('win', hashParams.get('w')); // the window whose QR was scanned
   history.replaceState(null, '', location.pathname); // keep the key out of the address bar
 }
 let token = store.get('token', '');
 const clientId = randomId();
 
-class AuthError extends Error {}
+// Which Antigravity window this phone is looking at. Requests go to /w/<id>/api/...
+let winId = null;
+let winKey = ''; // stable name for the window (its first folder), for per-project phone state
+let windows = [];
+const prefix = () => (winId ? `/w/${encodeURIComponent(winId)}` : '');
 
-async function api(path, body) {
-  const res = await fetch(path, {
+class AuthError extends Error {}
+class WindowGone extends Error {}
+
+async function api(path, body, { raw = false } = {}) {
+  const res = await fetch(raw ? path : prefix() + path, {
     method: body ? 'POST' : 'GET',
     headers: { 'X-Token': token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
     cache: 'no-store',
   });
   if (res.status === 401 || res.status === 429) throw new AuthError(res.status === 429 ? 'blocked' : 'wrong key');
+  if (res.status === 410) {
+    windowGone();
+    throw new WindowGone('window-gone');
+  }
   return res.json();
 }
 
@@ -396,8 +409,8 @@ function showDoc(uri) {
   current = uri;
   const d = docs.get(uri);
   view.setState(d.state);
-  store.set('open', [...docs.keys()]);
-  store.set('current', current);
+  store.set('open:' + winKey, [...docs.keys()]);
+  store.set('current:' + winKey, current);
   renderTabs();
   renderHeader();
   renderCursor();
@@ -417,7 +430,7 @@ function closeDoc(uri) {
     if (next) showDoc(next);
     else view.setState(EditorState.create({ doc: '' }));
   }
-  store.set('open', [...docs.keys()]);
+  store.set('open:' + winKey, [...docs.keys()]);
   renderTabs();
   renderHeader();
 }
@@ -541,7 +554,7 @@ let everConnected = false;
 function connect() {
   if (es) es.close();
   setStatus('connecting');
-  es = new EventSource(`/api/events?t=${encodeURIComponent(token)}&c=${clientId}`);
+  es = new EventSource(`${prefix()}/api/events?t=${encodeURIComponent(token)}&c=${clientId}`);
   es.onopen = () => {
     setStatus('online');
     scheduleProblems();
@@ -553,6 +566,7 @@ function connect() {
     try {
       await api('/api/tabs');
     } catch (err) {
+      if (err instanceof WindowGone) return;
       if (err instanceof AuthError) {
         es.close();
         showLogin(err.message);
@@ -563,6 +577,7 @@ function connect() {
     const ev = JSON.parse(m.data);
     switch (ev.type) {
       case 'hello':
+        loadWorkspace();
         pcTabs = ev.tabs;
         setActive(ev.active);
         renderPcTabs();
@@ -586,6 +601,11 @@ function connect() {
         }
         break;
       }
+      case 'workspace':
+        loadWorkspace();
+        loadFiles();
+        refreshWindows();
+        break;
       case 'problems':
         scheduleProblems();
         break;
@@ -615,8 +635,8 @@ function setActive(uri) {
 }
 
 async function restoreOpenDocs() {
-  const open = store.get('open', []);
-  const cur = store.get('current', null);
+  const open = store.get('open:' + winKey, []);
+  const cur = store.get('current:' + winKey, null);
   for (const uri of open) await openDoc(uri, { quiet: true });
   if (cur && docs.has(cur)) showDoc(cur);
   if (!docs.size && pcActive) openDoc(pcActive, { quiet: true });
@@ -711,6 +731,7 @@ function fileIcon(name) {
 
 // ---------------------------------------------------------------- side bar (activity bar + views)
 const docked = window.matchMedia('(min-width: 900px)');
+let started = false; // set once we know which window to talk to
 let activeView = store.get('view', 'explorer');
 let sidebarShown = store.get('sidebar', true); // only used when docked
 
@@ -719,9 +740,9 @@ function showView(name) {
   store.set('view', name);
   for (const b of document.querySelectorAll('#activity button[data-view]')) b.classList.toggle('on', b.dataset.view === name);
   for (const v of document.querySelectorAll('#sidebar .view')) v.hidden = v.dataset.view !== name;
-  if (name === 'explorer' && !fileList) loadFiles();
-  if (name === 'extensions' && !extList) loadExtensions();
-  if (name === 'problems') loadProblems();
+  if (name === 'explorer' && !fileList && started) loadFiles();
+  if (name === 'extensions' && !extList && started) loadExtensions();
+  if (name === 'problems' && started) loadProblems();
   if (name === 'search') setTimeout(() => $('#search').focus(), 50);
 }
 
@@ -800,7 +821,11 @@ const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 
 function renderTree() {
   const box = $('#tree');
   if (!fileList) return box.replaceChildren(el('p', { className: 'muted', textContent: 'กำลังโหลดไฟล์…' }));
-  if (!fileList.length) return box.replaceChildren(el('p', { className: 'muted', textContent: 'ไม่มีไฟล์ในโปรเจกต์ที่เปิดอยู่' }));
+  if (!fileList.length) {
+    const b = el('button', { className: 'extCmd', textContent: '📂  เปิดโฟลเดอร์…' });
+    b.onclick = openProjects;
+    return box.replaceChildren(el('p', { className: 'muted', textContent: 'หน้าต่างนี้ยังไม่ได้เปิดโฟลเดอร์' }), el('div', { style: 'padding:0 12px' }, b));
+  }
   const curPath = current && docs.get(current) ? docs.get(current).path : null;
   const rows = [];
   const walk = (node, depth) => {
@@ -857,6 +882,20 @@ async function loadFiles() {
     toast('โหลดรายชื่อไฟล์ไม่ได้');
   }
   tree = buildTree(fileList);
+  // Several folders in one window: like VS Code, show each top-level folder expanded the first time.
+  const w = currentWindow();
+  if (w && w.folders.length > 1) {
+    const seen = new Set(store.get('rootsSeen', []));
+    for (const f of w.folders) {
+      const name = f.split(/[\\/]/).pop();
+      if (!seen.has(f)) {
+        expanded.add(name);
+        seen.add(f);
+      }
+    }
+    store.set('rootsSeen', [...seen]);
+    store.set('expanded', [...expanded]);
+  }
   $('#wsName').textContent = (wsName || 'โปรเจกต์').toUpperCase();
   renderTree();
   renderSearch();
@@ -1056,6 +1095,284 @@ async function loadProblems() {
   box.replaceChildren(...rows);
 }
 
+// ---------------------------------------------------------------- projects / windows
+let wsInfo = null;
+let switchTo = null; // folder we are waiting to see opened on the computer
+const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase();
+const keyOf = (w) => (w && (w.folders[0] || w.name)) || '';
+
+async function refreshWindows() {
+  try {
+    const res = await api('/api/windows', null, { raw: true });
+    windows = res.windows || [];
+  } catch (err) {
+    if (err instanceof AuthError) showLogin(err.message);
+    return null;
+  }
+  renderProjectLabel();
+  if ($('#projSheet') && !$('#projSheet').hidden) renderProjects();
+  return windows;
+}
+
+// Pick the window to show at start-up: the one whose QR was scanned, else the same project
+// as last time, else the main window.
+async function initWindows() {
+  const list = await refreshWindows();
+  if (!list) return; // older computer side without windows support: talk to /api directly
+  const wanted = store.get('win', null);
+  const lastKey = store.get('winKey', '');
+  const w = list.find((x) => x.id === wanted) || list.find((x) => keyOf(x) === lastKey) || list[0];
+  if (w) setWindow(w);
+}
+
+function setWindow(w) {
+  winId = w.id;
+  winKey = keyOf(w);
+  store.set('win', winId);
+  store.set('winKey', winKey);
+  renderProjectLabel();
+}
+
+function currentWindow() {
+  return windows.find((w) => w.id === winId) || null;
+}
+
+function renderProjectLabel() {
+  const w = currentWindow();
+  const name = w ? w.name : wsInfo ? wsInfo.name || 'โปรเจกต์' : 'โปรเจกต์';
+  $('#projBtn .label').textContent = name;
+  $('#sbProject').textContent = '⧉ ' + name + (windows.length > 1 ? ` (${windows.length} หน้าต่าง)` : '');
+}
+
+async function switchWindow(w) {
+  if (w.id === winId) return closeProjects();
+  for (const d of docs.values()) if (d.pending || d.inflight) await settle(d);
+  for (const uri of [...docs.keys()]) {
+    const d = docs.get(uri);
+    d.closed = true;
+    clearTimeout(d.flushTimer);
+    clearTimeout(d.ackTimer);
+  }
+  docs.clear();
+  current = null;
+  view.setState(EditorState.create({ doc: '' }));
+  setWindow(w);
+  fileList = null;
+  tree = null;
+  extList = null;
+  commandList = null;
+  wsInfo = null;
+  pcTabs = [];
+  $('#results').replaceChildren();
+  renderTabs();
+  renderHeader();
+  renderPcTabs();
+  renderTree();
+  closeProjects();
+  toast(`สลับไปที่ ${w.name}`, 1500);
+  connect();
+  if (activeView === 'explorer') loadFiles();
+  scheduleProblems();
+}
+
+// The window we were using went away (closed, or reloaded after opening another folder).
+let goneTimer = null;
+function windowGone() {
+  if (goneTimer) return;
+  setStatus('connecting');
+  const started = Date.now();
+  const tick = async () => {
+    const list = await refreshWindows();
+    if (list && list.length) {
+      const want = switchTo ? norm(switchTo) : null;
+      const w =
+        (want && list.find((x) => x.folders.some((f) => norm(f) === want))) ||
+        (!want && list.find((x) => keyOf(x) === winKey)) ||
+        (!want && Date.now() - started > 15000 && list[0]);
+      if (w) {
+        goneTimer = null;
+        switchTo = null;
+        winId = null; // force the switch even if the id looks the same
+        return switchWindow(w);
+      }
+    }
+    goneTimer = setTimeout(tick, 1000);
+  };
+  goneTimer = setTimeout(tick, 300);
+}
+
+async function loadWorkspace() {
+  try {
+    const res = await api('/api/workspace');
+    if (res.ok) wsInfo = res;
+  } catch {
+    return;
+  }
+  renderProjectLabel();
+  if (!$('#projSheet').hidden) renderProjects();
+}
+
+function openProjects() {
+  $('#projSheet').hidden = false;
+  renderProjects();
+  refreshWindows();
+  loadWorkspace();
+}
+function closeProjects() {
+  $('#projSheet').hidden = true;
+}
+
+function renderProjects() {
+  const box = $('#projBody');
+  const parts = [];
+  parts.push(el('h4', { textContent: 'หน้าต่างที่เปิดอยู่บนคอม' }));
+  if (!windows.length) parts.push(el('p', { className: 'muted', textContent: 'กำลังโหลด…' }));
+  for (const w of windows) {
+    const row = el(
+      'button',
+      { className: 'file proj' + (w.id === winId ? ' active' : '') },
+      el('span', { className: 'name', textContent: (w.id === winId ? '✓ ' : '') + w.name }),
+      el('span', { className: 'dir', textContent: w.folders.join('  ·  ') || 'ยังไม่ได้เปิดโฟลเดอร์' })
+    );
+    row.onclick = () => switchWindow(w);
+    parts.push(row);
+  }
+
+  parts.push(el('h4', { textContent: 'เปิดโฟลเดอร์' }));
+  const act = (label, mode, hint) => {
+    const b = el('button', { className: 'extCmd', textContent: label });
+    b.title = hint;
+    b.onclick = () => openBrowser(mode);
+    return b;
+  };
+  parts.push(
+    act('📂  เปิดโฟลเดอร์ในหน้าต่างใหม่', 'new', 'หน้าต่างเดิมยังเปิดอยู่'),
+    act('🔁  เปิดโฟลเดอร์แทนโปรเจกต์นี้', 'replace', 'หน้าต่างนี้บนคอมจะเปลี่ยนไปเป็นโฟลเดอร์ใหม่'),
+    act('➕  เพิ่มโฟลเดอร์เข้าหน้าต่างนี้ (หลายโปรเจกต์ในหน้าต่างเดียว)', 'add', 'Add Folder to Workspace')
+  );
+
+  if (wsInfo && wsInfo.folders.length) {
+    parts.push(el('h4', { textContent: 'โฟลเดอร์ในหน้าต่างนี้' }));
+    for (const f of wsInfo.folders) {
+      const rm = el('button', { className: 'mini', textContent: 'เอาออก' });
+      rm.onclick = async (e) => {
+        e.stopPropagation();
+        if (!confirm(`เอา ${f.name} ออกจากหน้าต่างนี้? (ไฟล์ไม่ถูกลบ)`)) return;
+        const r = await api('/api/removeFolder', { path: f.path }).catch(() => ({ ok: false }));
+        toast(r.ok ? 'เอาออกแล้ว' : r.error || 'ทำไม่ได้');
+      };
+      parts.push(el('div', { className: 'file proj' }, el('span', { className: 'name', textContent: f.name }), el('span', { className: 'dir', textContent: f.path }), rm));
+    }
+  }
+
+  if (wsInfo && wsInfo.recent.length) {
+    parts.push(el('h4', { textContent: 'เปิดล่าสุด' }));
+    for (const r of wsInfo.recent) {
+      const nw = el('button', { className: 'mini', textContent: 'หน้าต่างใหม่' });
+      nw.onclick = () => doOpen(r.path, 'new');
+      const rp = el('button', { className: 'mini', textContent: 'แทนที่' });
+      rp.onclick = () => doOpen(r.path, 'replace');
+      parts.push(el('div', { className: 'file proj' }, el('span', { className: 'name', textContent: r.name }), el('span', { className: 'dir', textContent: r.path }), el('span', { className: 'btns' }, nw, rp)));
+    }
+  }
+  box.replaceChildren(...parts);
+}
+
+// ---- folder browser
+let browseMode = 'new';
+let browsePath = null;
+const MODE_TEXT = { new: 'เปิดในหน้าต่างใหม่', replace: 'เปิดแทนโปรเจกต์นี้', add: 'เพิ่มเข้าหน้าต่างนี้' };
+
+function openBrowser(mode) {
+  browseMode = mode;
+  $('#browseSheet').hidden = false;
+  browse(browsePath || (wsInfo && wsInfo.folders[0] ? parentOf(wsInfo.folders[0].path) : null));
+}
+function closeBrowser() {
+  $('#browseSheet').hidden = true;
+}
+const parentOf = (p) => p.replace(/[\\/][^\\/]+[\\/]?$/, '') || p;
+
+async function browse(p) {
+  let res;
+  try {
+    res = await api('/api/browse', { path: p });
+  } catch (err) {
+    if (err instanceof AuthError) return showLogin(err.message);
+    return toast('ไล่ดูโฟลเดอร์ไม่ได้');
+  }
+  if (!res.ok) {
+    toast(res.error);
+    if (!res.dirs) return;
+  }
+  browsePath = res.path;
+  $('#browsePath').textContent = res.path;
+  const here = res.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || res.path;
+  $('#browseGo').textContent = `✓ ${MODE_TEXT[browseMode]}: ${here}`;
+  const items = [];
+  if (res.drives && res.drives.length) {
+    items.push(
+      el('div', { className: 'chips' }, ...res.drives.map((d) => {
+        const b = el('button', { className: 'mini', textContent: d });
+        b.onclick = () => browse(d);
+        return b;
+      }))
+    );
+  }
+  if (res.parent) {
+    const up = el('button', { className: 'node folder' }, el('span', { className: 'chev', textContent: '↰' }), el('span', { className: 'name', textContent: '.. (ขึ้นไป)' }));
+    up.onclick = () => browse(res.parent);
+    items.push(up);
+  }
+  for (const d of res.dirs) {
+    const row = el('button', { className: 'node folder' }, el('span', { className: 'chev', textContent: '▸' }), el('span', { className: 'name', textContent: d }));
+    row.onclick = () => browse(res.path.replace(/[\\/]$/, '') + (res.path.includes('\\') ? '\\' : '/') + d);
+    items.push(row);
+  }
+  if (!res.dirs.length) items.push(el('p', { className: 'muted', textContent: 'ไม่มีโฟลเดอร์ย่อย' }));
+  $('#browseList').replaceChildren(...items);
+  $('#browseHome').onclick = () => browse(res.home);
+}
+
+async function doOpen(p, mode) {
+  closeBrowser();
+  browsePath = parentOf(p); // next time start next to the folder just chosen
+  if (mode === 'add') {
+    const r = await api('/api/addFolder', { path: p }).catch(() => ({ ok: false }));
+    toast(r.ok ? (r.already ? 'โฟลเดอร์นี้อยู่ในหน้าต่างแล้ว' : 'เพิ่มโฟลเดอร์แล้ว') : r.error || 'ทำไม่ได้');
+    if (r.ok) {
+      closeProjects();
+      setTimeout(() => {
+        loadFiles();
+        refreshWindows();
+      }, 800);
+    }
+    return;
+  }
+  const r = await api('/api/openFolder', { path: p, mode }).catch(() => ({ ok: false }));
+  if (!r.ok) return toast(r.error || 'เปิดโฟลเดอร์ไม่ได้');
+  closeProjects();
+  toast('กำลังเปิดโฟลเดอร์บนคอม… รอสักครู่', 4000);
+  switchTo = r.path;
+  // Wait for the window that has this folder to appear, then switch to it.
+  const started = Date.now();
+  const tick = async () => {
+    if (!switchTo) return; // windowGone() already switched
+    const list = await refreshWindows();
+    const w = list && list.find((x) => x.folders.some((f) => norm(f) === norm(switchTo)));
+    if (w) {
+      switchTo = null;
+      return switchWindow(w);
+    }
+    if (Date.now() - started > 60000) {
+      switchTo = null;
+      return toast('ยังไม่เห็นหน้าต่างใหม่บนคอม ลองแตะชื่อโปรเจกต์อีกครั้งภายหลัง', 5000);
+    }
+    setTimeout(tick, 1000);
+  };
+  setTimeout(tick, 1000);
+}
+
 // ---------------------------------------------------------------- settings
 function applyPrefs() {
   document.documentElement.style.setProperty('--fs', prefs.fontSize + 'px');
@@ -1130,6 +1447,11 @@ function wire() {
   }
   for (const h of document.querySelectorAll('.paneHead')) h.onclick = () => togglePane(h);
   $('#reload').onclick = loadFiles;
+  $('#projBtn').onclick = openProjects;
+  $('#sbProject').onclick = openProjects;
+  $('#projClose').onclick = closeProjects;
+  $('#browseClose').onclick = closeBrowser;
+  $('#browseGo').onclick = () => browsePath && doOpen(browsePath, browseMode);
   $('#collapseAll').onclick = () => {
     expanded.clear();
     store.set('expanded', []);
@@ -1226,5 +1548,10 @@ applyLayout();
 showView(activeView);
 renderHeader();
 renderTabs();
-if (token) connect();
-else showLogin();
+(async () => {
+  if (!token) return showLogin();
+  await initWindows();
+  started = true;
+  connect();
+  if (activeView === 'explorer' && !fileList) loadFiles();
+})();

@@ -3537,8 +3537,8 @@ var require_server = __commonJS({
     var http = require("http");
     var fs = require("fs");
     var path = require("path");
-    var os = require("os");
-    var crypto = require("crypto");
+    var os2 = require("os");
+    var crypto2 = require("crypto");
     var { ChangeSet, Text } = require_dist2();
     var STATIC = {
       "/": ["index.html", "text/html; charset=utf-8"],
@@ -3574,7 +3574,7 @@ var require_server = __commonJS({
     var FILE_EXCLUDE = "**/{node_modules,.git,dist,out,build,.next,.nuxt,.venv,venv,__pycache__,target,.gradle,Pods}/**";
     var normalize = (s) => s.replace(/\r\n?/g, "\n");
     var toText = (s) => Text.of(normalize(s).split("\n"));
-    var sha = (s) => crypto.createHash("sha256").update(String(s)).digest();
+    var sha = (s) => crypto2.createHash("sha256").update(String(s)).digest();
     var SyncServer2 = class {
       constructor(vscode2, opts) {
         this.vscode = vscode2;
@@ -3622,7 +3622,7 @@ var require_server = __commonJS({
           addTo(host, "Address");
           return out;
         }
-        for (const list of Object.values(os.networkInterfaces())) {
+        for (const list of Object.values(os2.networkInterfaces())) {
           for (const a of list || []) {
             if (a.family !== "IPv4" && a.family !== 4) continue;
             if (a.internal) continue;
@@ -3687,6 +3687,9 @@ var require_server = __commonJS({
             if (ed) this.broadcast({ type: "active", uri: ed.document.uri.toString() });
           })
         );
+        if (vs.workspace.onDidChangeWorkspaceFolders) {
+          this.disposables.push(vs.workspace.onDidChangeWorkspaceFolders(() => this.broadcast({ type: "workspace" })));
+        }
         if (vs.languages && vs.languages.onDidChangeDiagnostics) {
           this.disposables.push(
             vs.languages.onDidChangeDiagnostics((e) => {
@@ -3737,7 +3740,7 @@ var require_server = __commonJS({
       async handle(req, res) {
         const url = new URL(req.url, "http://x");
         let address = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
-        const viaRelay = this.opts.agentNonce && (address === "127.0.0.1" || address === "::1") && typeof req.headers["x-mobile-sync-agent"] === "string" && req.headers["x-mobile-sync-agent"].length === this.opts.agentNonce.length && crypto.timingSafeEqual(Buffer.from(req.headers["x-mobile-sync-agent"]), Buffer.from(this.opts.agentNonce));
+        const viaRelay = this.opts.agentNonce && (address === "127.0.0.1" || address === "::1") && typeof req.headers["x-mobile-sync-agent"] === "string" && req.headers["x-mobile-sync-agent"].length === this.opts.agentNonce.length && crypto2.timingSafeEqual(Buffer.from(req.headers["x-mobile-sync-agent"]), Buffer.from(this.opts.agentNonce));
         if (viaRelay) address = "VPS:" + String(req.headers["x-mobile-sync-remote"] || "?").slice(0, 64);
         if (req.method === "GET" && STATIC[url.pathname]) {
           const [file, type] = STATIC[url.pathname];
@@ -3749,7 +3752,7 @@ var require_server = __commonJS({
         const f = this.fails.get(address);
         if (f && f.until > Date.now()) return this.fail(res, 429, "blocked");
         const given = req.headers["x-token"] || (url.pathname === "/api/events" ? url.searchParams.get("t") : "");
-        if (!given || !crypto.timingSafeEqual(sha(given), this.tokenHash)) {
+        if (!given || !crypto2.timingSafeEqual(sha(given), this.tokenHash)) {
           const rec = f || { count: 0, until: 0 };
           rec.count++;
           if (rec.count >= MAX_FAILS) {
@@ -3768,6 +3771,7 @@ var require_server = __commonJS({
         if (route === "GET /api/commands") return this.json(res, this.commandList());
         if (route === "GET /api/extensions") return this.json(res, this.extensionList());
         if (route === "GET /api/problems") return this.json(res, this.problems());
+        if (route === "GET /api/workspace") return this.json(res, await this.workspaceInfo());
         if (req.method !== "POST") return this.fail(res, 404, "not found");
         const body = await readJson(req);
         if (route === "POST /api/open") return this.json(res, await this.open(body));
@@ -3775,10 +3779,14 @@ var require_server = __commonJS({
         if (route === "POST /api/save") return this.json(res, await this.save(body));
         if (route === "POST /api/run") return this.json(res, await this.run(body));
         if (route === "POST /api/search") return this.json(res, await this.search(body));
+        if (route === "POST /api/browse") return this.json(res, this.browse(body));
+        if (route === "POST /api/openFolder") return this.json(res, await this.openFolder(body));
+        if (route === "POST /api/addFolder") return this.json(res, this.addFolder(body));
+        if (route === "POST /api/removeFolder") return this.json(res, this.removeFolder(body));
         return this.fail(res, 404, "not found");
       }
       events(req, res, url, address) {
-        const id = String(url.searchParams.get("c") || crypto.randomUUID()).slice(0, 64);
+        const id = String(url.searchParams.get("c") || crypto2.randomUUID()).slice(0, 64);
         res.writeHead(200, {
           ...SECURITY_HEADERS,
           "Content-Type": "text/event-stream; charset=utf-8",
@@ -3930,6 +3938,85 @@ var require_server = __commonJS({
           }
         }
         return { allowed: true, commands: [...out.values()].sort((a, b) => a.title.localeCompare(b.title)) };
+      }
+      // ---------- projects / folders
+      folders() {
+        return (this.vscode.workspace.workspaceFolders || []).map((f) => ({ name: f.name, path: f.uri.fsPath }));
+      }
+      async workspaceInfo() {
+        const vs = this.vscode;
+        let recent = [];
+        try {
+          const r = await vs.commands.executeCommand("_workbench.getRecentlyOpened");
+          for (const w of r && r.workspaces || []) {
+            const u = w.folderUri || w.workspace && w.workspace.configPath;
+            if (u && u.scheme === "file") recent.push({ path: u.fsPath, name: w.label || path.basename(u.fsPath) });
+          }
+        } catch {
+        }
+        const open = new Set(this.folders().map((f) => f.path));
+        recent = recent.filter((r) => !open.has(r.path)).slice(0, 30);
+        return { ok: true, name: vs.workspace.name || "", folders: this.folders(), recent, home: os2.homedir(), sep: path.sep };
+      }
+      // List sub-folders of a folder on this computer (for "open folder" on the phone).
+      browse({ path: p }) {
+        const target = typeof p === "string" && p ? path.resolve(p) : os2.homedir();
+        let entries;
+        try {
+          entries = fs.readdirSync(target, { withFileTypes: true });
+        } catch (err) {
+          return { ok: false, error: "\u0E40\u0E1B\u0E34\u0E14\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C\u0E19\u0E35\u0E49\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49: " + err.code, path: target };
+        }
+        const dirs = entries.filter((e) => {
+          if (e.isDirectory()) return true;
+          if (!e.isSymbolicLink()) return false;
+          try {
+            return fs.statSync(path.join(target, e.name)).isDirectory();
+          } catch {
+            return false;
+          }
+        }).map((e) => e.name).filter((n) => !/^(\$Recycle\.Bin|System Volume Information)$/i.test(n)).sort((a, b) => a.localeCompare(b, void 0, { sensitivity: "base", numeric: true }));
+        const parent = path.dirname(target);
+        const drives = [];
+        if (process.platform === "win32") {
+          for (const L of "CDEFGHIJKLMNOPQRSTUVWXYZ") if (fs.existsSync(L + ":\\")) drives.push(L + ":\\");
+        }
+        return { ok: true, path: target, parent: parent !== target ? parent : null, dirs, drives, home: os2.homedir() };
+      }
+      isDir(p) {
+        try {
+          return typeof p === "string" && fs.statSync(p).isDirectory();
+        } catch {
+          return false;
+        }
+      }
+      // Open a folder in a new window, or in place of this window's project (the window reloads).
+      async openFolder({ path: p, mode }) {
+        if (!this.isDir(p)) return { ok: false, error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C\u0E19\u0E35\u0E49" };
+        const vs = this.vscode;
+        const uri = vs.Uri.file(path.resolve(p));
+        setTimeout(() => {
+          Promise.resolve(vs.commands.executeCommand("vscode.openFolder", uri, { forceNewWindow: mode !== "replace" })).catch(() => {
+          });
+        }, 100);
+        return { ok: true, path: uri.fsPath };
+      }
+      addFolder({ path: p }) {
+        if (!this.isDir(p)) return { ok: false, error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C\u0E19\u0E35\u0E49" };
+        const vs = this.vscode;
+        const list = vs.workspace.workspaceFolders || [];
+        const full = path.resolve(p);
+        if (list.some((f) => f.uri.fsPath === full)) return { ok: true, already: true };
+        const ok = vs.workspace.updateWorkspaceFolders(list.length, 0, { uri: vs.Uri.file(full) });
+        return ok ? { ok: true } : { ok: false, error: "\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49" };
+      }
+      removeFolder({ path: p }) {
+        const vs = this.vscode;
+        const list = vs.workspace.workspaceFolders || [];
+        const i = list.findIndex((f) => f.uri.fsPath === p);
+        if (i < 0) return { ok: false, error: "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C\u0E19\u0E35\u0E49\u0E43\u0E19 workspace" };
+        const ok = vs.workspace.updateWorkspaceFolders(i, 1);
+        return ok ? { ok: true } : { ok: false, error: "\u0E40\u0E2D\u0E32\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C\u0E2D\u0E2D\u0E01\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49" };
       }
       // Installed extensions, like the Extensions view.
       extensionList() {
@@ -4096,6 +4183,213 @@ var require_server = __commonJS({
       });
     }
     module2.exports = { SyncServer: SyncServer2 };
+  }
+});
+
+// src/hub.js
+var require_hub = __commonJS({
+  "src/hub.js"(exports2, module2) {
+    "use strict";
+    var http = require("http");
+    var fs = require("fs");
+    var path = require("path");
+    var crypto2 = require("crypto");
+    var STATIC = {
+      "/": ["index.html", "text/html; charset=utf-8"],
+      "/index.html": ["index.html", "text/html; charset=utf-8"],
+      "/app.js": ["app.js", "text/javascript; charset=utf-8"],
+      "/app.css": ["app.css", "text/css; charset=utf-8"],
+      "/icon.svg": ["icon.svg", "image/svg+xml"],
+      "/manifest.webmanifest": ["manifest.webmanifest", "application/manifest+json"]
+    };
+    var SECURITY_HEADERS = {
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY",
+      "Cache-Control": "no-store"
+    };
+    var WINDOW_TTL = 25e3;
+    var MAX_FAILS = 10;
+    var BLOCK_MS = 15 * 60 * 1e3;
+    var sha = (s) => crypto2.createHash("sha256").update(String(s)).digest();
+    var isLoopback = (a) => a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+    function agentNonceFor2(token) {
+      return crypto2.createHmac("sha256", String(token)).update("mobile-sync-agent").digest("base64url");
+    }
+    var HubServer2 = class {
+      constructor(opts) {
+        this.opts = opts;
+        this.tokenHash = sha(opts.token);
+        this.nonce = agentNonceFor2(opts.token);
+        this.windows = /* @__PURE__ */ new Map();
+        this.fails = /* @__PURE__ */ new Map();
+        this.http = http.createServer((req, res) => this.handle(req, res));
+        this.listening = false;
+      }
+      listen() {
+        return new Promise((resolve, reject) => {
+          this.http.once("error", reject);
+          this.http.listen(this.opts.port, this.opts.host, () => {
+            this.http.off("error", reject);
+            this.listening = true;
+            this.port = this.http.address().port;
+            this.sweep = setInterval(() => this.expire(), 5e3);
+            resolve();
+          });
+        });
+      }
+      close() {
+        this.listening = false;
+        clearInterval(this.sweep);
+        return new Promise((resolve) => {
+          this.http.close(() => resolve());
+          if (this.http.closeAllConnections) this.http.closeAllConnections();
+        });
+      }
+      register(w) {
+        const old = this.windows.get(w.id);
+        this.windows.set(w.id, { ...old, ...w, seen: Date.now() });
+      }
+      expire() {
+        for (const [id, w] of this.windows) {
+          if (id !== this.opts.ownId && Date.now() - w.seen > WINDOW_TTL) this.windows.delete(id);
+        }
+      }
+      list() {
+        this.expire();
+        return [...this.windows.values()].map((w) => ({ id: w.id, name: w.name, folders: w.folders || [], hub: w.id === this.opts.ownId })).sort((a, b) => (b.hub ? 1 : 0) - (a.hub ? 1 : 0) || a.name.localeCompare(b.name));
+      }
+      authed(req, address) {
+        const f = this.fails.get(address);
+        if (f && f.until > Date.now()) return "blocked";
+        const given = req.headers["x-token"];
+        if (given && crypto2.timingSafeEqual(sha(given), this.tokenHash)) {
+          this.fails.delete(address);
+          return "ok";
+        }
+        const rec = f || { count: 0, until: 0 };
+        if (++rec.count >= MAX_FAILS) {
+          rec.count = 0;
+          rec.until = Date.now() + BLOCK_MS;
+        }
+        this.fails.set(address, rec);
+        return "wrong";
+      }
+      json(res, code, obj) {
+        res.writeHead(code, { ...SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" });
+        res.end(JSON.stringify(obj));
+      }
+      handle(req, res) {
+        const url = new URL(req.url, "http://x");
+        const socketAddr = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+        const fromRelay = isLoopback(socketAddr) && typeof req.headers["x-mobile-sync-agent"] === "string" && req.headers["x-mobile-sync-agent"].length === this.nonce.length && crypto2.timingSafeEqual(Buffer.from(req.headers["x-mobile-sync-agent"]), Buffer.from(this.nonce));
+        const remote = fromRelay ? String(req.headers["x-mobile-sync-remote"] || "?").slice(0, 64) : socketAddr;
+        const address = fromRelay ? "VPS:" + remote : remote;
+        if (req.method === "GET" && STATIC[url.pathname]) {
+          const [file, type] = STATIC[url.pathname];
+          try {
+            const body = fs.readFileSync(path.join(this.opts.mediaDir, file));
+            res.writeHead(200, { ...SECURITY_HEADERS, "Content-Type": type });
+            return res.end(body);
+          } catch {
+            return this.json(res, 500, { ok: false, error: "missing file" });
+          }
+        }
+        if (url.pathname.startsWith("/_hub/")) {
+          if (!isLoopback(socketAddr) || fromRelay) return this.json(res, 403, { ok: false });
+          if (url.pathname === "/_hub/ping") return this.json(res, 200, { mobileSync: true });
+          if (this.authed(req, "local") !== "ok") return this.json(res, 401, { ok: false });
+          return readBody(req, (body) => {
+            if (url.pathname === "/_hub/register" && body && typeof body.id === "string" && Number.isInteger(body.port)) {
+              this.register({ id: body.id.slice(0, 64), name: String(body.name || "").slice(0, 200), folders: Array.isArray(body.folders) ? body.folders.slice(0, 50) : [], port: body.port });
+              return this.json(res, 200, { ok: true });
+            }
+            if (url.pathname === "/_hub/unregister" && body && typeof body.id === "string") {
+              this.windows.delete(body.id);
+              return this.json(res, 200, { ok: true });
+            }
+            return this.json(res, 404, { ok: false });
+          });
+        }
+        if (url.pathname === "/api/windows") {
+          const a = this.authed(req, address);
+          if (a !== "ok") return this.json(res, a === "blocked" ? 429 : 401, { ok: false, error: a });
+          return this.json(res, 200, { ok: true, windows: this.list() });
+        }
+        let target;
+        let rest;
+        const m = url.pathname.match(/^\/w\/([^/]+)(\/api\/.*)$/);
+        if (m) {
+          target = this.windows.get(decodeURIComponent(m[1]));
+          rest = m[2] + url.search;
+          if (!target) return this.json(res, 410, { ok: false, error: "window-gone" });
+        } else if (url.pathname.startsWith("/api/")) {
+          target = this.windows.get(this.opts.ownId);
+          rest = url.pathname + url.search;
+        } else return this.json(res, 404, { ok: false, error: "not found" });
+        if (!target) return this.json(res, 503, { ok: false, error: "window-gone" });
+        const headers = { ...req.headers };
+        delete headers.host;
+        headers["x-mobile-sync-remote"] = remote;
+        headers["x-mobile-sync-agent"] = this.nonce;
+        const fwd = http.request({ host: "127.0.0.1", port: target.port, method: req.method, path: rest, headers }, (r) => {
+          res.writeHead(r.statusCode, r.headers);
+          r.pipe(res);
+        });
+        fwd.on("error", () => {
+          if (!res.headersSent) this.json(res, 410, { ok: false, error: "window-gone" });
+          else res.end();
+        });
+        req.pipe(fwd);
+        res.on("close", () => fwd.destroy());
+      }
+    };
+    function readBody(req, cb) {
+      const chunks = [];
+      let size = 0;
+      req.on("data", (c) => {
+        size += c.length;
+        if (size < 65536) chunks.push(c);
+      });
+      req.on("end", () => {
+        try {
+          cb(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"));
+        } catch {
+          cb(null);
+        }
+      });
+    }
+    function hubRequest2(port, pathName, token, body) {
+      return new Promise((resolve, reject) => {
+        const data = body ? JSON.stringify(body) : "";
+        const req = http.request(
+          {
+            host: "127.0.0.1",
+            port,
+            path: pathName,
+            method: body ? "POST" : "GET",
+            headers: { "X-Token": token || "", "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+            timeout: 3e3
+          },
+          (res) => {
+            const chunks = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () => {
+              try {
+                resolve({ status: res.statusCode, body: JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") });
+              } catch {
+                resolve({ status: res.statusCode, body: null });
+              }
+            });
+          }
+        );
+        req.on("timeout", () => req.destroy(new Error("timeout")));
+        req.on("error", reject);
+        req.end(data);
+      });
+    }
+    module2.exports = { HubServer: HubServer2, hubRequest: hubRequest2, agentNonceFor: agentNonceFor2 };
   }
 });
 
@@ -9422,7 +9716,7 @@ var require_relay = __commonJS({
   "src/relay.js"(exports2, module2) {
     "use strict";
     var http = require("http");
-    var crypto = require("crypto");
+    var crypto2 = require("crypto");
     var WebSocket = require_ws();
     function parseConnectString2(s) {
       const str = String(s || "").trim();
@@ -9500,7 +9794,7 @@ var require_relay = __commonJS({
                   return;
                 }
               }
-              const mac = crypto.createHmac("sha256", this.cfg.key).update(m.n).digest("hex");
+              const mac = crypto2.createHmac("sha256", this.cfg.key).update(m.n).digest("hex");
               ws.send(JSON.stringify({ t: "auth", mac }));
             } else if (m.t === "ok") {
               authed = true;
@@ -9576,14 +9870,23 @@ var require_relay = __commonJS({
 
 // src/extension.js
 var vscode = require("vscode");
+var os = require("os");
+var crypto = require("crypto");
 var { SyncServer } = require_server();
+var { HubServer, hubRequest, agentNonceFor } = require_hub();
 var { qrSvg } = require_qr();
 var { RelayClient, parseConnectString } = require_relay();
 var SECRET_KEY = "mobileSync.token";
 var RELAY_KEY = "mobileSync.relay";
+var RUNNING_KEY = "mobileSync.running";
+var windowId = crypto.randomBytes(8).toString("hex");
 var server = null;
+var hub = null;
 var relay = null;
+var heartbeat = null;
 var statusItem = null;
+var ctx = null;
+var starting = null;
 function config() {
   const c = vscode.workspace.getConfiguration("mobileSync");
   return {
@@ -9596,76 +9899,152 @@ function config() {
 async function getToken(context, reset = false) {
   let token = reset ? void 0 : await context.secrets.get(SECRET_KEY);
   if (!token) {
-    token = require("crypto").randomBytes(24).toString("base64url");
+    token = crypto.randomBytes(24).toString("base64url");
     await context.secrets.store(SECRET_KEY, token);
   }
   return token;
 }
+var running = () => !!(server && server.listening);
+function windowInfo() {
+  return {
+    id: windowId,
+    name: vscode.workspace.name || "\u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E27\u0E48\u0E32\u0E07 (\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E1B\u0E34\u0E14\u0E42\u0E1F\u0E25\u0E40\u0E14\u0E2D\u0E23\u0E4C)",
+    folders: (vscode.workspace.workspaceFolders || []).map((f) => f.uri.fsPath),
+    port: server.port
+  };
+}
 function updateStatus() {
   if (!statusItem) return;
-  if (server && server.listening) {
+  if (running()) {
     const n = server.clientCount();
     const vps = relay ? { online: " \xB7 VPS \u2713", connecting: " \xB7 VPS \u2026", offline: " \xB7 VPS \u2717", denied: " \xB7 VPS \u2717" }[relay.status] : "";
-    statusItem.text = `$(device-mobile) Mobile Sync: ${n ? n + " connected" : "on"}${vps}`;
-    statusItem.tooltip = "Mobile Sync \u0E01\u0E33\u0E25\u0E31\u0E07\u0E17\u0E33\u0E07\u0E32\u0E19 \u2014 \u0E01\u0E14\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E40\u0E21\u0E19\u0E39";
-    statusItem.command = "mobileSync.menu";
+    const role = hub ? "" : " (\u0E23\u0E48\u0E27\u0E21)";
+    statusItem.text = `$(device-mobile) Mobile Sync: ${n ? n + " connected" : "on"}${role}${vps}`;
+    statusItem.tooltip = hub ? "Mobile Sync \u0E01\u0E33\u0E25\u0E31\u0E07\u0E17\u0E33\u0E07\u0E32\u0E19 (\u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E2B\u0E25\u0E31\u0E01) \u2014 \u0E01\u0E14\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E40\u0E21\u0E19\u0E39" : "Mobile Sync \u0E01\u0E33\u0E25\u0E31\u0E07\u0E17\u0E33\u0E07\u0E32\u0E19 (\u0E40\u0E02\u0E49\u0E32\u0E23\u0E48\u0E27\u0E21\u0E01\u0E31\u0E1A\u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E2B\u0E25\u0E31\u0E01) \u2014 \u0E01\u0E14\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E40\u0E21\u0E19\u0E39";
   } else {
     statusItem.text = "$(device-mobile) Mobile Sync: off";
     statusItem.tooltip = "\u0E01\u0E14\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E40\u0E21\u0E19\u0E39 Mobile Sync";
-    statusItem.command = "mobileSync.menu";
   }
+  statusItem.command = "mobileSync.menu";
   statusItem.show();
 }
-async function start(context) {
-  if (server && server.listening) {
-    showLink();
+async function start(context, { quiet = false } = {}) {
+  if (running()) {
+    if (!quiet) showLink();
     return;
   }
-  const cfg = config();
-  const token = await getToken(context);
-  server = new SyncServer(vscode, {
-    port: cfg.port,
-    host: cfg.host,
-    token,
-    allowCommands: cfg.allowCommands,
-    agentNonce: require("crypto").randomBytes(24).toString("base64url"),
-    mediaDir: vscode.Uri.joinPath(context.extensionUri, "media").fsPath,
-    onClientsChanged: (info) => {
-      updateStatus();
-      if (info && info.connected && config().notifyOnConnect) {
-        vscode.window.showInformationMessage(`Mobile Sync: \u0E21\u0E35\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D\u0E40\u0E02\u0E49\u0E32\u0E21\u0E32\u0E08\u0E32\u0E01 ${info.address} (\u0E16\u0E49\u0E32\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E04\u0E38\u0E13 \u0E43\u0E2B\u0E49\u0E01\u0E14 Stop \u0E41\u0E25\u0E49\u0E27 Reset Secret Key)`);
-      }
-    },
-    onSuspicious: (address) => {
-      vscode.window.showWarningMessage(
-        `Mobile Sync: \u0E1A\u0E25\u0E47\u0E2D\u0E01 ${address} \u0E41\u0E25\u0E49\u0E27 \u0E40\u0E1E\u0E23\u0E32\u0E30\u0E43\u0E2A\u0E48\u0E23\u0E2B\u0E31\u0E2A\u0E1C\u0E34\u0E14\u0E2B\u0E25\u0E32\u0E22\u0E04\u0E23\u0E31\u0E49\u0E07`
-      );
+  if (starting) return starting;
+  starting = (async () => {
+    const cfg = config();
+    const token = await getToken(context);
+    server = new SyncServer(vscode, {
+      port: 0,
+      host: "127.0.0.1",
+      // private; phones reach it through the hub
+      token,
+      allowCommands: cfg.allowCommands,
+      agentNonce: agentNonceFor(token),
+      mediaDir: vscode.Uri.joinPath(context.extensionUri, "media").fsPath,
+      onClientsChanged: (info) => {
+        updateStatus();
+        if (info && info.connected && config().notifyOnConnect) {
+          vscode.window.showInformationMessage(
+            `Mobile Sync: \u0E21\u0E35\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D\u0E40\u0E02\u0E49\u0E32\u0E21\u0E32\u0E08\u0E32\u0E01 ${info.address} (\u0E16\u0E49\u0E32\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E04\u0E38\u0E13 \u0E43\u0E2B\u0E49\u0E01\u0E14 Stop \u0E41\u0E25\u0E49\u0E27 Reset Secret Key)`
+          );
+        }
+      },
+      onSuspicious: (address) => vscode.window.showWarningMessage(`Mobile Sync: \u0E1A\u0E25\u0E47\u0E2D\u0E01 ${address} \u0E41\u0E25\u0E49\u0E27 \u0E40\u0E1E\u0E23\u0E32\u0E30\u0E43\u0E2A\u0E48\u0E23\u0E2B\u0E31\u0E2A\u0E1C\u0E34\u0E14\u0E2B\u0E25\u0E32\u0E22\u0E04\u0E23\u0E31\u0E49\u0E07`)
+    });
+    try {
+      await server.listen();
+    } catch (err) {
+      server = null;
+      vscode.window.showErrorMessage(`Mobile Sync: \u0E40\u0E1B\u0E34\u0E14\u0E40\u0E0B\u0E34\u0E23\u0E4C\u0E1F\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49: ${err.message}`);
+      return;
     }
-  });
+    await context.globalState.update(RUNNING_KEY, true);
+    const role = await joinOrLead(context);
+    if (role === "error") {
+      await server.close();
+      server = null;
+      updateStatus();
+      return;
+    }
+    heartbeat = setInterval(() => beat(context).catch(() => {
+    }), 5e3);
+    updateStatus();
+    if (!quiet) showLink();
+  })();
   try {
-    await server.listen();
-  } catch (err) {
-    server = null;
-    vscode.window.showErrorMessage(`Mobile Sync: \u0E40\u0E1B\u0E34\u0E14\u0E40\u0E0B\u0E34\u0E23\u0E4C\u0E1F\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49: ${err.message} (\u0E16\u0E49\u0E32\u0E1E\u0E2D\u0E23\u0E4C\u0E15\u0E0A\u0E19 \u0E43\u0E2B\u0E49\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19 mobileSync.port \u0E43\u0E19 Settings)`);
+    await starting;
+  } finally {
+    starting = null;
+  }
+}
+async function beat(context) {
+  if (!context.globalState.get(RUNNING_KEY, false)) {
+    await shutdown();
     updateStatus();
     return;
   }
+  await joinOrLead(context);
+}
+async function joinOrLead(context) {
+  if (!running()) return "error";
+  const cfg = config();
+  const token = await getToken(context);
+  if (hub) {
+    hub.register(windowInfo());
+    return "hub";
+  }
+  try {
+    const r = await hubRequest(cfg.port, "/_hub/register", token, windowInfo());
+    if (r.status === 200) return "peer";
+  } catch {
+  }
+  const h = new HubServer({
+    host: cfg.host,
+    port: cfg.port,
+    token,
+    ownId: windowId,
+    mediaDir: vscode.Uri.joinPath(context.extensionUri, "media").fsPath
+  });
+  try {
+    await h.listen();
+  } catch (err) {
+    if (err.code === "EADDRINUSE") {
+      let isOurs = false;
+      try {
+        isOurs = (await hubRequest(cfg.port, "/_hub/ping")).body?.mobileSync === true;
+      } catch {
+      }
+      if (isOurs) return "peer";
+      vscode.window.showErrorMessage(
+        `Mobile Sync: \u0E1E\u0E2D\u0E23\u0E4C\u0E15 ${cfg.port} \u0E16\u0E39\u0E01\u0E42\u0E1B\u0E23\u0E41\u0E01\u0E23\u0E21\u0E2D\u0E37\u0E48\u0E19\u0E43\u0E0A\u0E49\u0E2D\u0E22\u0E39\u0E48 \u0E43\u0E2B\u0E49\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19 mobileSync.port \u0E43\u0E19 Settings`
+      );
+      return "error";
+    }
+    vscode.window.showErrorMessage(`Mobile Sync: \u0E40\u0E1B\u0E34\u0E14\u0E1E\u0E2D\u0E23\u0E4C\u0E15 ${cfg.port} \u0E44\u0E21\u0E48\u0E44\u0E14\u0E49: ${err.message}`);
+    return "error";
+  }
+  hub = h;
+  hub.register(windowInfo());
   await startRelay(context);
   updateStatus();
-  showLink();
+  return "hub";
 }
 async function startRelay(context) {
   if (relay) relay.stop();
   relay = null;
   const connect = await context.secrets.get(RELAY_KEY);
-  if (!connect || !server || !server.listening) return;
-  const host = server.opts.host;
+  if (!connect || !hub) return;
+  const host = config().host;
   try {
     relay = new RelayClient({
       connect,
       localHost: !host || host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host,
-      localPort: server.port,
-      agentNonce: server.opts.agentNonce,
+      localPort: hub.port,
+      agentNonce: hub.nonce,
       onStatus: (st, detail) => {
         updateStatus();
         if (st === "denied") vscode.window.showErrorMessage(`Mobile Sync: \u0E15\u0E48\u0E2D VPS \u0E44\u0E21\u0E48\u0E44\u0E14\u0E49 \u2014 ${detail}`);
@@ -9676,6 +10055,28 @@ async function startRelay(context) {
     return;
   }
   relay.start();
+}
+async function shutdown() {
+  clearInterval(heartbeat);
+  heartbeat = null;
+  if (relay) relay.stop();
+  relay = null;
+  if (hub) await hub.close();
+  else if (server && ctx) {
+    try {
+      await hubRequest(config().port, "/_hub/unregister", await getToken(ctx), { id: windowId });
+    } catch {
+    }
+  }
+  hub = null;
+  if (server) await server.close();
+  server = null;
+}
+async function stop(context) {
+  await shutdown();
+  await context.globalState.update(RUNNING_KEY, false);
+  updateStatus();
+  vscode.window.showInformationMessage("Mobile Sync: \u0E1B\u0E34\u0E14\u0E41\u0E25\u0E49\u0E27 (\u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E2D\u0E37\u0E48\u0E19\u0E08\u0E30\u0E2B\u0E22\u0E38\u0E14\u0E15\u0E32\u0E21\u0E20\u0E32\u0E22\u0E43\u0E19\u0E44\u0E21\u0E48\u0E01\u0E35\u0E48\u0E27\u0E34\u0E19\u0E32\u0E17\u0E35)");
 }
 async function connectRelay(context) {
   const value = await vscode.window.showInputBox({
@@ -9695,12 +10096,14 @@ async function connectRelay(context) {
   });
   if (!value) return;
   await context.secrets.store(RELAY_KEY, value.trim());
-  if (server && server.listening) {
+  if (hub) {
     await startRelay(context);
     updateStatus();
     vscode.window.showInformationMessage("Mobile Sync: \u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E41\u0E25\u0E49\u0E27 \u0E01\u0E33\u0E25\u0E31\u0E07\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D VPS\u2026");
+  } else if (running()) {
+    vscode.window.showInformationMessage("Mobile Sync: \u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E41\u0E25\u0E49\u0E27 \u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E2B\u0E25\u0E31\u0E01\u0E08\u0E30\u0E43\u0E0A\u0E49\u0E04\u0E48\u0E32\u0E19\u0E35\u0E49\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E40\u0E23\u0E34\u0E48\u0E21\u0E43\u0E2B\u0E21\u0E48\u0E04\u0E23\u0E31\u0E49\u0E07\u0E16\u0E31\u0E14\u0E44\u0E1B");
   } else {
-    vscode.window.showInformationMessage("Mobile Sync: \u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E41\u0E25\u0E49\u0E27 \u0E08\u0E30\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D VPS \u0E40\u0E21\u0E37\u0E48\u0E2D\u0E2A\u0E31\u0E48\u0E07 Start");
+    vscode.window.showInformationMessage("Mobile Sync: \u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E41\u0E25\u0E49\u0E27 \u0E08\u0E30\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D VPS \u0E40\u0E21\u0E37\u0E48\u0E2D\u0E40\u0E23\u0E34\u0E48\u0E21 Mobile Sync");
   }
 }
 async function disconnectRelay(context) {
@@ -9710,40 +10113,51 @@ async function disconnectRelay(context) {
   updateStatus();
   vscode.window.showInformationMessage("Mobile Sync: \u0E40\u0E25\u0E34\u0E01\u0E43\u0E0A\u0E49 VPS \u0E41\u0E25\u0E49\u0E27");
 }
-async function stop() {
-  if (relay) relay.stop();
-  relay = null;
-  if (server) {
-    await server.close();
-    server = null;
+function lanUrls(port, token, w) {
+  const out = [];
+  const host = config().host;
+  const q = `#t=${encodeURIComponent(token)}&w=${w}`;
+  if (host && host !== "0.0.0.0" && host !== "::") {
+    if (!/^(127\.|localhost$|::1$)/.test(host)) out.push({ label: "\u0E17\u0E35\u0E48\u0E2D\u0E22\u0E39\u0E48", url: `http://${host}:${port}/${q}` });
+    return out;
   }
-  updateStatus();
-  vscode.window.showInformationMessage("Mobile Sync: \u0E1B\u0E34\u0E14\u0E41\u0E25\u0E49\u0E27 \u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E16\u0E39\u0E01\u0E15\u0E31\u0E14\u0E01\u0E32\u0E23\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D");
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) {
+      if (a.family !== "IPv4" && a.family !== 4 || a.internal) continue;
+      const [x, y] = a.address.split(".").map(Number);
+      const tailscale = x === 100 && y >= 64 && y <= 127;
+      out.push({ label: tailscale ? "Tailscale (\u0E43\u0E0A\u0E49\u0E19\u0E2D\u0E01\u0E1A\u0E49\u0E32\u0E19\u0E44\u0E14\u0E49)" : "Wi-Fi \u0E1A\u0E49\u0E32\u0E19 (\u0E40\u0E04\u0E23\u0E37\u0E2D\u0E02\u0E48\u0E32\u0E22\u0E40\u0E14\u0E35\u0E22\u0E27\u0E01\u0E31\u0E19)", url: `http://${a.address}:${port}/${q}` });
+    }
+  }
+  return out.sort((a) => a.label.startsWith("Wi-Fi") ? -1 : 1);
 }
 var linkPanel = null;
-function showLink() {
-  if (!server || !server.listening) {
-    vscode.window.showWarningMessage('Mobile Sync \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E40\u0E1B\u0E34\u0E14 \u2014 \u0E2A\u0E31\u0E48\u0E07 "Mobile Sync: Start" \u0E01\u0E48\u0E2D\u0E19');
+async function showLink() {
+  if (!running()) {
+    vscode.window.showWarningMessage('Mobile Sync \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E40\u0E1B\u0E34\u0E14 \u2014 \u0E01\u0E14\u0E1B\u0E38\u0E48\u0E21 Mobile Sync \u0E17\u0E35\u0E48\u0E41\u0E16\u0E1A\u0E25\u0E48\u0E32\u0E07 \u0E41\u0E25\u0E49\u0E27\u0E40\u0E25\u0E37\u0E2D\u0E01 "\u0E40\u0E23\u0E34\u0E48\u0E21 Mobile Sync"');
     return;
   }
-  const urls = server.urls().filter((u) => !/\/\/(127\.|localhost|\[::1\])/.test(u.url));
-  if (relay) {
-    urls.unshift({
-      label: relay.cfg.pin ? "\u0E1C\u0E48\u0E32\u0E19 VPS (\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E38\u0E01\u0E17\u0E35\u0E48 \u2014 \u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E08\u0E30\u0E40\u0E15\u0E37\u0E2D\u0E19\u0E40\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E43\u0E1A\u0E23\u0E31\u0E1A\u0E23\u0E2D\u0E07 \u0E43\u0E2B\u0E49\u0E01\u0E14\u0E14\u0E33\u0E40\u0E19\u0E34\u0E19\u0E01\u0E32\u0E23\u0E15\u0E48\u0E2D)" : "\u0E1C\u0E48\u0E32\u0E19 VPS (\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E38\u0E01\u0E17\u0E35\u0E48)",
-      url: `${relay.origin}/#t=${encodeURIComponent(server.opts.token)}`,
-      note: relay.status === "online" ? "" : "\u0E15\u0E2D\u0E19\u0E19\u0E35\u0E49\u0E22\u0E31\u0E07\u0E15\u0E48\u0E2D VPS \u0E44\u0E21\u0E48\u0E15\u0E34\u0E14"
-    });
+  const token = await getToken(ctx);
+  const urls = lanUrls(config().port, token, windowId);
+  const connect = await ctx.secrets.get(RELAY_KEY);
+  if (connect) {
+    try {
+      const cfg = parseConnectString(connect);
+      urls.unshift({
+        label: cfg.pin ? "\u0E1C\u0E48\u0E32\u0E19 VPS (\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E38\u0E01\u0E17\u0E35\u0E48 \u2014 \u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E08\u0E30\u0E40\u0E15\u0E37\u0E2D\u0E19\u0E40\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E43\u0E1A\u0E23\u0E31\u0E1A\u0E23\u0E2D\u0E07 \u0E43\u0E2B\u0E49\u0E01\u0E14\u0E14\u0E33\u0E40\u0E19\u0E34\u0E19\u0E01\u0E32\u0E23\u0E15\u0E48\u0E2D)" : "\u0E1C\u0E48\u0E32\u0E19 VPS (\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E38\u0E01\u0E17\u0E35\u0E48)",
+        url: `${cfg.origin}/#t=${encodeURIComponent(token)}&w=${windowId}`,
+        note: !hub ? "" : relay && relay.status === "online" ? "" : "\u0E15\u0E2D\u0E19\u0E19\u0E35\u0E49\u0E22\u0E31\u0E07\u0E15\u0E48\u0E2D VPS \u0E44\u0E21\u0E48\u0E15\u0E34\u0E14"
+      });
+    } catch {
+    }
   }
   if (!urls.length) {
     vscode.window.showWarningMessage("Mobile Sync: \u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E17\u0E35\u0E48\u0E2D\u0E22\u0E39\u0E48\u0E40\u0E04\u0E23\u0E37\u0E2D\u0E02\u0E48\u0E32\u0E22 \u0E04\u0E2D\u0E21\u0E15\u0E48\u0E2D Wi-Fi \u0E2D\u0E22\u0E39\u0E48\u0E2B\u0E23\u0E37\u0E2D\u0E40\u0E1B\u0E25\u0E48\u0E32?");
     return;
   }
-  if (linkPanel) {
-    linkPanel.reveal();
-  } else {
-    linkPanel = vscode.window.createWebviewPanel("mobileSyncLink", "Mobile Sync", vscode.ViewColumn.Active, {
-      enableScripts: false
-    });
+  if (linkPanel) linkPanel.reveal();
+  else {
+    linkPanel = vscode.window.createWebviewPanel("mobileSyncLink", "Mobile Sync", vscode.ViewColumn.Active, { enableScripts: false });
     linkPanel.onDidDispose(() => linkPanel = null);
   }
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -9765,20 +10179,19 @@ function showLink() {
  .warn{color:var(--vscode-editorWarning-foreground)}
 </style></head><body>
 <h1>\u0E2A\u0E41\u0E01\u0E19 QR \u0E14\u0E49\u0E27\u0E22\u0E01\u0E25\u0E49\u0E2D\u0E07\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D</h1>
-<p>\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D\u0E15\u0E49\u0E2D\u0E07\u0E15\u0E48\u0E2D Wi-Fi \u0E27\u0E07\u0E40\u0E14\u0E35\u0E22\u0E27\u0E01\u0E31\u0E1A\u0E04\u0E2D\u0E21 \u0E2B\u0E23\u0E37\u0E2D\u0E17\u0E31\u0E49\u0E07\u0E2A\u0E2D\u0E07\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E40\u0E1B\u0E34\u0E14 Tailscale \u0E44\u0E27\u0E49</p>
+<p>\u0E25\u0E34\u0E07\u0E01\u0E4C\u0E19\u0E35\u0E49\u0E08\u0E30\u0E40\u0E1B\u0E34\u0E14\u0E42\u0E1B\u0E23\u0E40\u0E08\u0E01\u0E15\u0E4C <b>${esc(windowInfo().name)}</b> \u0E1A\u0E19\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D (\u0E2A\u0E25\u0E31\u0E1A\u0E44\u0E1B\u0E2B\u0E19\u0E49\u0E32\u0E15\u0E48\u0E32\u0E07\u0E2D\u0E37\u0E48\u0E19\u0E44\u0E14\u0E49\u0E43\u0E19\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D)</p>
 <p class="warn">\u26A0 \u0E25\u0E34\u0E07\u0E01\u0E4C\u0E19\u0E35\u0E49\u0E21\u0E35\u0E23\u0E2B\u0E31\u0E2A\u0E25\u0E31\u0E1A\u0E2D\u0E22\u0E39\u0E48\u0E02\u0E49\u0E32\u0E07\u0E43\u0E19 \u0E2B\u0E49\u0E32\u0E21\u0E2A\u0E48\u0E07\u0E43\u0E2B\u0E49\u0E43\u0E04\u0E23\u0E2B\u0E23\u0E37\u0E2D\u0E42\u0E1E\u0E2A\u0E15\u0E4C\u0E17\u0E35\u0E48\u0E44\u0E2B\u0E19
  \u0E16\u0E49\u0E32\u0E2B\u0E25\u0E38\u0E14 \u0E43\u0E2B\u0E49\u0E2A\u0E31\u0E48\u0E07 <b>Mobile Sync: Reset Secret Key</b></p>
 ${items}
 </body></html>`;
 }
 async function menu(context) {
-  const running = server && server.listening;
   const hasRelay = !!await context.secrets.get(RELAY_KEY);
   const items = [];
-  if (!running) items.push({ label: "$(play) \u0E40\u0E23\u0E34\u0E48\u0E21 Mobile Sync", run: () => start(context) });
+  if (!running()) items.push({ label: "$(play) \u0E40\u0E23\u0E34\u0E48\u0E21 Mobile Sync", run: () => start(context) });
   else {
     items.push({ label: "$(device-mobile) \u0E41\u0E2A\u0E14\u0E07 QR / \u0E25\u0E34\u0E07\u0E01\u0E4C\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D", run: () => showLink() });
-    items.push({ label: "$(debug-stop) \u0E2B\u0E22\u0E38\u0E14 Mobile Sync", run: () => stop() });
+    items.push({ label: "$(debug-stop) \u0E2B\u0E22\u0E38\u0E14 Mobile Sync", run: () => stop(context) });
   }
   items.push({
     label: hasRelay ? "$(globe) \u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E02\u0E49\u0E2D\u0E04\u0E27\u0E32\u0E21\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D VPS" : "$(globe) \u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D\u0E1C\u0E48\u0E32\u0E19 VPS (\u0E27\u0E32\u0E07\u0E02\u0E49\u0E2D\u0E04\u0E27\u0E32\u0E21\u0E08\u0E32\u0E01 VPS)",
@@ -9790,31 +10203,32 @@ async function menu(context) {
   if (pick) await pick.run();
 }
 function activate(context) {
+  ctx = context;
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   context.subscriptions.push(statusItem);
   updateStatus();
   context.subscriptions.push(
     vscode.commands.registerCommand("mobileSync.start", () => start(context)),
-    vscode.commands.registerCommand("mobileSync.stop", () => stop()),
+    vscode.commands.registerCommand("mobileSync.stop", () => stop(context)),
     vscode.commands.registerCommand("mobileSync.showLink", () => showLink()),
     vscode.commands.registerCommand("mobileSync.menu", () => menu(context)),
     vscode.commands.registerCommand("mobileSync.connectRelay", () => connectRelay(context)),
     vscode.commands.registerCommand("mobileSync.disconnectRelay", () => disconnectRelay(context)),
     vscode.commands.registerCommand("mobileSync.resetToken", async () => {
-      const wasRunning = server && server.listening;
-      if (wasRunning) await stop();
+      const was = running();
+      if (was) await stop(context);
       await getToken(context, true);
       vscode.window.showInformationMessage("Mobile Sync: \u0E2A\u0E23\u0E49\u0E32\u0E07\u0E23\u0E2B\u0E31\u0E2A\u0E43\u0E2B\u0E21\u0E48\u0E41\u0E25\u0E49\u0E27 \u0E25\u0E34\u0E07\u0E01\u0E4C/QR \u0E40\u0E14\u0E34\u0E21\u0E43\u0E0A\u0E49\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E2D\u0E35\u0E01");
-      if (wasRunning) await start(context);
+      if (was) await start(context);
     }),
-    { dispose: () => (relay && relay.stop(), server && server.close()) }
+    vscode.workspace.onDidChangeWorkspaceFolders(() => running() && joinOrLead(context).catch(() => {
+    })),
+    { dispose: () => shutdown() }
   );
-  if (vscode.workspace.getConfiguration("mobileSync").get("autoStart", false)) {
-    start(context);
-  }
+  const auto = context.globalState.get(RUNNING_KEY, false) || vscode.workspace.getConfiguration("mobileSync").get("autoStart", false);
+  if (auto) start(context, { quiet: true });
 }
 function deactivate() {
-  if (relay) relay.stop();
-  if (server) return server.close();
+  return shutdown();
 }
 module.exports = { activate, deactivate };

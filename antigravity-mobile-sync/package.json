@@ -88,7 +88,7 @@
   "scripts": {
     "build": "node build.mjs",
     "package": "node build.mjs && vsce package --no-dependencies --allow-missing-repository -o mobile-sync.vsix",
-    "test": "node build.mjs && node test/run.mjs && node test/relay.mjs",
+    "test": "node build.mjs && node test/run.mjs && node test/relay.mjs && node test/windows.mjs",
     "relay": "cd relay && GOTOOLCHAIN=go1.20.14 CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags=\"-s -w\" -o bin/mobile-sync-relay.exe . && GOTOOLCHAIN=go1.20.14 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags=\"-s -w\" -o bin/mobile-sync-relay-linux . && python3 -c \"import zipfile;z=zipfile.ZipFile('bin/mobile-sync-relay-windows.zip','w',zipfile.ZIP_DEFLATED);[z.write(s,'mobile-sync-relay/'+s.split('/')[-1]) for s in ['bin/mobile-sync-relay.exe','install-relay.cmd','uninstall-relay.cmd','README-VPS.txt']]\""
   },
   "devDependencies": {

@@ -171,6 +171,9 @@ class SyncServer {
         if (ed) this.broadcast({ type: 'active', uri: ed.document.uri.toString() });
       })
     );
+    if (vs.workspace.onDidChangeWorkspaceFolders) {
+      this.disposables.push(vs.workspace.onDidChangeWorkspaceFolders(() => this.broadcast({ type: 'workspace' })));
+    }
     if (vs.languages && vs.languages.onDidChangeDiagnostics) {
       this.disposables.push(
         vs.languages.onDidChangeDiagnostics((e) => {
@@ -266,6 +269,7 @@ class SyncServer {
     if (route === 'GET /api/commands') return this.json(res, this.commandList());
     if (route === 'GET /api/extensions') return this.json(res, this.extensionList());
     if (route === 'GET /api/problems') return this.json(res, this.problems());
+    if (route === 'GET /api/workspace') return this.json(res, await this.workspaceInfo());
     if (req.method !== 'POST') return this.fail(res, 404, 'not found');
 
     const body = await readJson(req);
@@ -274,6 +278,10 @@ class SyncServer {
     if (route === 'POST /api/save') return this.json(res, await this.save(body));
     if (route === 'POST /api/run') return this.json(res, await this.run(body));
     if (route === 'POST /api/search') return this.json(res, await this.search(body));
+    if (route === 'POST /api/browse') return this.json(res, this.browse(body));
+    if (route === 'POST /api/openFolder') return this.json(res, await this.openFolder(body));
+    if (route === 'POST /api/addFolder') return this.json(res, this.addFolder(body));
+    if (route === 'POST /api/removeFolder') return this.json(res, this.removeFolder(body));
     return this.fail(res, 404, 'not found');
   }
 
@@ -448,6 +456,97 @@ class SyncServer {
       }
     }
     return { allowed: true, commands: [...out.values()].sort((a, b) => a.title.localeCompare(b.title)) };
+  }
+
+  // ---------- projects / folders
+
+  folders() {
+    return (this.vscode.workspace.workspaceFolders || []).map((f) => ({ name: f.name, path: f.uri.fsPath }));
+  }
+
+  async workspaceInfo() {
+    const vs = this.vscode;
+    let recent = [];
+    try {
+      // Same list as File > Open Recent (internal command, best effort).
+      const r = await vs.commands.executeCommand('_workbench.getRecentlyOpened');
+      for (const w of (r && r.workspaces) || []) {
+        const u = w.folderUri || (w.workspace && w.workspace.configPath);
+        if (u && u.scheme === 'file') recent.push({ path: u.fsPath, name: w.label || path.basename(u.fsPath) });
+      }
+    } catch {}
+    const open = new Set(this.folders().map((f) => f.path));
+    recent = recent.filter((r) => !open.has(r.path)).slice(0, 30);
+    return { ok: true, name: vs.workspace.name || '', folders: this.folders(), recent, home: os.homedir(), sep: path.sep };
+  }
+
+  // List sub-folders of a folder on this computer (for "open folder" on the phone).
+  browse({ path: p }) {
+    const target = typeof p === 'string' && p ? path.resolve(p) : os.homedir();
+    let entries;
+    try {
+      entries = fs.readdirSync(target, { withFileTypes: true });
+    } catch (err) {
+      return { ok: false, error: 'เปิดโฟลเดอร์นี้ไม่ได้: ' + err.code, path: target };
+    }
+    const dirs = entries
+      .filter((e) => {
+        if (e.isDirectory()) return true;
+        if (!e.isSymbolicLink()) return false;
+        try {
+          return fs.statSync(path.join(target, e.name)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+      .map((e) => e.name)
+      .filter((n) => !/^(\$Recycle\.Bin|System Volume Information)$/i.test(n))
+      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }));
+    const parent = path.dirname(target);
+    const drives = [];
+    if (process.platform === 'win32') {
+      for (const L of 'CDEFGHIJKLMNOPQRSTUVWXYZ') if (fs.existsSync(L + ':\\')) drives.push(L + ':\\');
+    }
+    return { ok: true, path: target, parent: parent !== target ? parent : null, dirs, drives, home: os.homedir() };
+  }
+
+  isDir(p) {
+    try {
+      return typeof p === 'string' && fs.statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  // Open a folder in a new window, or in place of this window's project (the window reloads).
+  async openFolder({ path: p, mode }) {
+    if (!this.isDir(p)) return { ok: false, error: 'ไม่พบโฟลเดอร์นี้' };
+    const vs = this.vscode;
+    const uri = vs.Uri.file(path.resolve(p));
+    // Run after replying: replacing the folder reloads this window (and this server).
+    setTimeout(() => {
+      Promise.resolve(vs.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: mode !== 'replace' })).catch(() => {});
+    }, 100);
+    return { ok: true, path: uri.fsPath };
+  }
+
+  addFolder({ path: p }) {
+    if (!this.isDir(p)) return { ok: false, error: 'ไม่พบโฟลเดอร์นี้' };
+    const vs = this.vscode;
+    const list = vs.workspace.workspaceFolders || [];
+    const full = path.resolve(p);
+    if (list.some((f) => f.uri.fsPath === full)) return { ok: true, already: true };
+    const ok = vs.workspace.updateWorkspaceFolders(list.length, 0, { uri: vs.Uri.file(full) });
+    return ok ? { ok: true } : { ok: false, error: 'เพิ่มโฟลเดอร์ไม่ได้' };
+  }
+
+  removeFolder({ path: p }) {
+    const vs = this.vscode;
+    const list = vs.workspace.workspaceFolders || [];
+    const i = list.findIndex((f) => f.uri.fsPath === p);
+    if (i < 0) return { ok: false, error: 'ไม่พบโฟลเดอร์นี้ใน workspace' };
+    const ok = vs.workspace.updateWorkspaceFolders(i, 1);
+    return ok ? { ok: true } : { ok: false, error: 'เอาโฟลเดอร์ออกไม่ได้' };
   }
 
   // Installed extensions, like the Extensions view.
