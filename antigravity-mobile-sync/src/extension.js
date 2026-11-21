@@ -91,6 +91,7 @@ async function start(context, { quiet = false } = {}) {
       host: '127.0.0.1', // private; phones reach it through the hub
       token,
       allowCommands: cfg.allowCommands,
+      build: typeof __BUILD__ === 'string' ? __BUILD__ : undefined,
       agentNonce: agentNonceFor(token),
       mediaDir: vscode.Uri.joinPath(context.extensionUri, 'media').fsPath,
       onClientsChanged: (info) => {

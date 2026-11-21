@@ -588,6 +588,7 @@ function connect() {
     const ev = JSON.parse(m.data);
     switch (ev.type) {
       case 'hello':
+        if (checkBuild(ev.build)) return;
         loadWorkspace();
         pcTabs = ev.tabs;
         setActive(ev.active);
@@ -1080,6 +1081,7 @@ async function loadProblems() {
     if (err instanceof AuthError) return showLogin(err.message);
     return;
   }
+  if (!res || !Array.isArray(res.files)) return;
   $('#sbProblems').textContent = `✖ ${res.errors}  ⚠ ${res.warnings}`;
   const badge = $('#actProblems');
   badge.hidden = !(res.errors + res.warnings);
@@ -1104,6 +1106,27 @@ async function loadProblems() {
     rows.push(head, list);
   }
   box.replaceChildren(...rows);
+}
+
+// ---------------------------------------------------------------- page version
+const BUILD = typeof __BUILD__ === 'string' ? __BUILD__ : 'dev';
+// The computer was updated but this page is older: reload once to get the new page.
+function checkBuild(serverBuild) {
+  if (!serverBuild || serverBuild === BUILD) return false;
+  let tried = null;
+  try {
+    tried = sessionStorage.getItem('ms.reloadFor');
+  } catch {}
+  if (tried === serverBuild) {
+    toast('หน้าเว็บยังเป็นเวอร์ชันเก่า — ลองปิดแท็บแล้วเปิดลิงก์ใหม่', 6000);
+    return false;
+  }
+  try {
+    sessionStorage.setItem('ms.reloadFor', serverBuild);
+  } catch {}
+  for (const d of docs.values()) if (d.pending || d.inflight) flush(d);
+  setTimeout(() => location.reload(), 300);
+  return true;
 }
 
 // ---------------------------------------------------------------- projects / windows
@@ -1386,6 +1409,7 @@ async function doOpen(p, mode) {
 
 // ---------------------------------------------------------------- settings
 function applyPrefs() {
+  $('#buildInfo').textContent = 'Mobile Sync ' + BUILD;
   document.documentElement.style.setProperty('--fs', prefs.fontSize + 'px');
   $('#wrap').checked = prefs.wrap;
   $('#follow').checked = prefs.follow;

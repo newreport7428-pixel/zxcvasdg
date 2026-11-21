@@ -299,7 +299,7 @@ class SyncServer {
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
-    res.write(`data: ${JSON.stringify({ type: 'hello', tabs: this.tabs(), active: this.activeUri() })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: 'hello', build: this.opts.build, tabs: this.tabs(), active: this.activeUri() })}\n\n`);
     const old = this.clients.get(id);
     if (old) old.res.end();
     this.clients.set(id, { res, address });

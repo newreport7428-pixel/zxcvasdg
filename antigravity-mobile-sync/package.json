@@ -2,7 +2,7 @@
   "name": "antigravity-mobile-sync",
   "displayName": "Mobile Sync",
   "description": "Edit the files open in Antigravity / VS Code from your phone browser, live, including unsaved changes. Runs only on your own network.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "private": true,

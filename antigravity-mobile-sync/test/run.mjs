@@ -315,6 +315,22 @@ const page2 = await ctx.newPage();
 await page2.goto(`${base}/#t=wrong`);
 check('wrong key shows login screen', await until(() => page2.isVisible('#login')));
 
+// --- the computer was updated but the phone page is old: the page reloads itself once
+{
+  const srv = new SyncServer(vscode, { port: 0, host: '127.0.0.1', token, build: 'newer-build', mediaDir: path.join(root, 'media') });
+  await srv.listen();
+  const p3 = await ctx.newPage();
+  let loads = 0;
+  p3.on('load', () => loads++);
+  await p3.goto(`http://127.0.0.1:${srv.port}/#t=${token}`);
+  check('outdated phone page reloads itself', await until(() => loads >= 2, 8000), `loads=${loads}`);
+  await wait(1500);
+  check('...but only once (no reload loop)', loads === 2, `loads=${loads}`);
+  check('...and tells the user if still outdated', await until(async () => ((await p3.textContent('#toast')) || '').includes('เวอร์ชันเก่า'), 5000));
+  await p3.close();
+  await srv.close();
+}
+
 check('no page errors', errors.length === 0, errors.join(' | '));
 await browser.close();
 await server2.close();

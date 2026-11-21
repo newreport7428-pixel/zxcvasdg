@@ -3799,7 +3799,7 @@ var require_server = __commonJS({
           Connection: "keep-alive",
           "X-Accel-Buffering": "no"
         });
-        res.write(`data: ${JSON.stringify({ type: "hello", tabs: this.tabs(), active: this.activeUri() })}
+        res.write(`data: ${JSON.stringify({ type: "hello", build: this.opts.build, tabs: this.tabs(), active: this.activeUri() })}
 
 `);
         const old = this.clients.get(id);
@@ -9973,6 +9973,7 @@ async function start(context, { quiet = false } = {}) {
       // private; phones reach it through the hub
       token,
       allowCommands: cfg.allowCommands,
+      build: true ? "0.2.0+mwq90atw" : void 0,
       agentNonce: agentNonceFor(token),
       mediaDir: vscode.Uri.joinPath(context.extensionUri, "media").fsPath,
       onClientsChanged: (info) => {
